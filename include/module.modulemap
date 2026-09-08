@@ -1,0 +1,4 @@
+module CWagaWebRTC {
+    header "waga_webrtc.h"
+    export *
+}

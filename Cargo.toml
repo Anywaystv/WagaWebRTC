@@ -1,0 +1,12 @@
+[workspace]
+members = ["rust"]
+resolver = "2"
+exclude = ["vendor/str0m-0.23.1"]
+
+[patch.crates-io]
+str0m = { path = "vendor/str0m-0.23.1" }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
