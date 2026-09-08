@@ -73,3 +73,7 @@ Build the artifact before adding the local package to Xcode. Prebuilt binaries a
 - An iPhone cannot expose two independent cellular data interfaces to one app merely because two eSIMs are installed. The framework bonds every interface iOS actually exposes, normally one cellular path plus Wi-Fi and Ethernet.
 
 Rust transport tests, Swift codec/path/recovery tests and a one-minute iPhone AAC recording have passed locally. This is experimental: long-session stability, battery use and AAC under impaired bonded links have not been verified.
+
+## License
+
+WagaWebRTC's own code is licensed under [MIT](LICENSE). Vendored str0m and other dependencies retain their own licenses and copyright notices; see [vendor/](vendor/).
