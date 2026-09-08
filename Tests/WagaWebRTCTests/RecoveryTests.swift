@@ -1,0 +1,46 @@
+import Foundation
+@testable import WagaWebRTC
+import XCTest
+
+final class RecoveryTests: XCTestCase {
+    func testParityCoversEveryEighthPacket() {
+        var recovery = WagaRecovery()
+
+        for sequenceNumber in 1 ... 7 {
+            XCTAssertNil(recovery.record(rtpPacket(sequenceNumber: UInt16(sequenceNumber))))
+        }
+        let parity = recovery.record(rtpPacket(sequenceNumber: 8))
+
+        XCTAssertEqual(parity?[0 ..< 4], Data([0x57, 0x47, 0x52, 0x31]))
+        XCTAssertEqual(parity?[4], 1)
+        XCTAssertEqual(parity?[5], 8)
+    }
+
+    func testRepairRequestReadsSharedHistory() {
+        var recovery = WagaRecovery()
+        let wanted = rtpPacket(sequenceNumber: 4)
+        XCTAssertNil(recovery.record(wanted))
+
+        var request = Data([0x57, 0x47, 0x52, 0x31, 2, 1, 0, 0, 1, 2, 3, 4])
+        request.append(contentsOf: [0, 4])
+
+        XCTAssertEqual(recovery.repairs(for: request), [wanted])
+    }
+
+    func testRtcpIsNotScheduledAsMedia() {
+        var packet = rtpPacket(sequenceNumber: 1)
+        packet[1] = 200
+
+        XCTAssertFalse(isRtp(packet))
+    }
+
+    private func rtpPacket(sequenceNumber: UInt16) -> Data {
+        Data([
+            0x80, 111,
+            UInt8(sequenceNumber >> 8), UInt8(sequenceNumber & 0xFF),
+            0, 0, 0, 1,
+            1, 2, 3, 4,
+            UInt8(sequenceNumber & 0xFF), 0xAA,
+        ])
+    }
+}
