@@ -1,0 +1,13 @@
+.DS_Store
+.build/
+.swiftpm/
+Artifacts/
+rust/target/
+xcuserdata/
+target/
+.env
+.env.*
+*.local.md
+CLAUDE.md
+.claude/
+.serena/
