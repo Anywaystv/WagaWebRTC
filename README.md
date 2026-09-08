@@ -1,6 +1,16 @@
+![WagaWebRTC banner with a yellow dog mascot](wagawebrtc.png)
+
 # WagaWebRTC
 
-WagaWebRTC is a local Swift framework for publishing H.264 or H.265 video and Opus audio over WHIP, with optional experimental AAC publishing. Rust and str0m own SDP, ICE, DTLS, SRTP, RTP packetization, NACK, and RTCP. Swift and Network.framework own the UDP sockets so each cellular, Wi-Fi, and wired Ethernet interface can remain active at the same time.
+WagaWebRTC is a Swift framework built on the [str0m WebRTC library](https://github.com/algesten/str0m) for Rust. It publishes H.264 or H.265 video and Opus audio over WHIP, with optional experimental AAC publishing.
+
+## Built on str0m
+
+[str0m](https://github.com/algesten/str0m) provides the WebRTC core: SDP, ICE, DTLS, SRTP, RTP packetization, NACK, and RTCP. Its Sans I/O design leaves network operations to the application. WagaWebRTC adds the Swift/C bridge, per-interface UDP sockets through Network.framework, path selection, and shared-history packet recovery.
+
+Credit to the str0m authors and contributors. We use a pinned copy of str0m 0.23.1 with a local experimental AAC patch; see the [patch notes](vendor/README.md). For the upstream library, see the [str0m repository](https://github.com/algesten/str0m) and [API documentation](https://docs.rs/str0m).
+
+## Usage
 
 The public surface is intentionally small:
 
