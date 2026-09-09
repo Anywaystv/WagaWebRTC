@@ -312,6 +312,11 @@ pub extern "C" fn waga_peer_request_path_probe(peer: *mut WagaPeer) -> bool {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn waga_peer_restart_on_path_change(peer: *mut WagaPeer) -> bool {
+    run(peer, |peer| peer.publisher.restart_on_path_change())
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn waga_peer_poll_transmit(peer: *mut WagaPeer, output: *mut WagaTransmit) -> bool {
     let Ok(peer) = peer_mut(peer) else {
         return false;

@@ -374,6 +374,16 @@ impl Publisher {
         self.drain_at(now)
     }
 
+    pub fn restart_on_path_change(&mut self) -> Result<(), String> {
+        let now = Instant::now();
+        self.bitrate_estimates.clear();
+        self.rtc.bwe().restart_on_path_change(now);
+        self.rtc
+            .handle_input(Input::Timeout(now))
+            .map_err(|error| error.to_string())?;
+        self.drain_at(now)
+    }
+
     pub fn poll_transmit(&mut self) -> Option<Transmit> {
         self.output.pop_front()
     }
@@ -1099,7 +1109,20 @@ mod tests {
 
     #[test]
     fn publisher_delivers_a_complete_video_frame_to_receiver() {
-        let mut publisher = Publisher::new(Some(Codec::Opus), Some(Codec::H264)).unwrap();
+        check_video_delivery(false);
+    }
+
+    #[test]
+    fn bandwidth_handoff_preserves_the_media_session() {
+        check_video_delivery(true);
+    }
+
+    fn check_video_delivery(handoff: bool) {
+        let mut publisher = if handoff {
+            Publisher::new_with_bwe(Some(Codec::Opus), Some(Codec::H264), Some(250_000), Some(6_000_000))
+        } else {
+            Publisher::new(Some(Codec::Opus), Some(Codec::H264))
+        }.unwrap();
         let mut receiver = Publisher::new_receiver().unwrap();
         publisher
             .add_local_candidate("127.0.0.1:40000".parse().unwrap())
@@ -1144,6 +1167,11 @@ mod tests {
         assert!(publisher.rtc.is_connected());
         assert!(receiver.rtc.is_connected());
 
+        if handoff {
+            publisher.restart_on_path_change().unwrap();
+            assert!(publisher.rtc.is_connected());
+            assert!(receiver.rtc.is_connected());
+        }
         let frame = [0, 0, 0, 2, 0x65, 0x01];
         publisher.send(Codec::H264, 90_000, &frame).unwrap();
         for _ in 0..100 {

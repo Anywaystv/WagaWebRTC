@@ -162,6 +162,10 @@ final class WagaCore: @unchecked Sendable {
         try check(waga_peer_request_path_probe(peer))
     }
 
+    func restartOnPathChange() throws {
+        try check(waga_peer_restart_on_path_change(peer))
+    }
+
     func pollTransmit() -> WagaDatagram? {
         var output = WagaTransmit()
         guard waga_peer_poll_transmit(peer, &output),

@@ -8,6 +8,8 @@ struct WagaDelivery: Sendable {
         var window = 32_000
         var lastSent: UInt64 = 0
         var lastReduction: UInt64 = 0
+        var receivedPackets = 0
+        var lastReceived: UInt64 = 0
     }
 
     private struct Packet: Sendable {
@@ -65,6 +67,26 @@ struct WagaDelivery: Sendable {
         return available.isEmpty ? active : available
     }
 
+    func routes(_ scheduler: WagaPathScheduler, bytes: Int, now: UInt64, probing: String? = nil) -> [String] {
+        // Keep probes on one path only while its delivery window remains usable.
+        if let probing, scheduler.paths.contains(where: { $0.id == probing }),
+           let state = paths[probing], state.confirmed, now >= state.lastReceived,
+           now - state.lastReceived < Self.lifetime, allows(probing, bytes: bytes) {
+            return [probing]
+        }
+        var scheduler = scheduler
+        scheduler.replace(preferredPaths(scheduler.paths, bytes: bytes))
+        guard let primary = scheduler.select() else { return [] }
+        guard paths.values.contains(where: { $0.confirmed }),
+              let sample = scheduler.paths.filter({
+                  $0.id != primary && now >= (paths[$0.id]?.lastSent ?? 0)
+                      && now - (paths[$0.id]?.lastSent ?? 0) >= 250_000_000
+              }).min(by: {
+                  (paths[$0.id]?.lastSent ?? 0) < (paths[$1.id]?.lastSent ?? 0)
+              }) else { return [primary] }
+        return [primary, sample.id]
+    }
+
     mutating func record(_ data: Data, path id: String, remote: String, now: UInt64) {
         expire(now: now)
         paths[id]?.lastSent = now
@@ -101,6 +123,8 @@ struct WagaDelivery: Sendable {
             packets.removeValue(forKey: token)
             guard var state = paths[path] else { continue }
             state.confirmed = true
+            state.receivedPackets = min(state.receivedPackets + 1, 3)
+            state.lastReceived = now
             state.outstanding -= packet.bytes
             state.window = min(512_000, state.window + max(1, 1_200 * packet.bytes / state.window))
             paths[path] = state

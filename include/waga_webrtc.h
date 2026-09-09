@@ -75,6 +75,7 @@ bool waga_peer_send(WagaPeer *peer, int32_t codec, uint64_t media_time,
                     const uint8_t *data, size_t length);
 bool waga_peer_set_desired_bitrate(WagaPeer *peer, uint64_t bitrate);
 bool waga_peer_request_path_probe(WagaPeer *peer);
+bool waga_peer_restart_on_path_change(WagaPeer *peer);
 bool waga_peer_poll_transmit(WagaPeer *peer, WagaTransmit *output);
 int32_t waga_peer_poll_event(WagaPeer *peer);
 bool waga_peer_poll_media(WagaPeer *peer, WagaMedia *output);

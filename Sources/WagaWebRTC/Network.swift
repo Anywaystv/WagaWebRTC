@@ -11,6 +11,7 @@ final class WagaNetwork: @unchecked Sendable {
     var onReceive: ((String, String, Data) -> Void)?
     var onError: ((String) -> Void)?
     var onPathValidated: (() -> Void)?
+    var onHandoff: (() -> Void)?
 
     private let queue: DispatchQueue
     private let monitor = NWPathMonitor()
@@ -18,6 +19,7 @@ final class WagaNetwork: @unchecked Sendable {
     private var scheduler = WagaPathScheduler()
     private var recovery = WagaRecovery()
     private var delivery = WagaDelivery()
+    private var handoff = WagaHandoff()
     private var connected = false
     private var remoteIcePassword: String?
     private let bonding: Bool
@@ -51,6 +53,7 @@ final class WagaNetwork: @unchecked Sendable {
         scheduler.replace([])
         recovery.removeAll()
         delivery = WagaDelivery()
+        handoff = WagaHandoff()
     }
 
     func setConnected(_ connected: Bool) {
@@ -106,7 +109,9 @@ final class WagaNetwork: @unchecked Sendable {
                 }
                 path.onValidated = { [weak self, weak path] in
                     guard let self, let path, bonding, connected,
+                          let port = path.port,
                           paths.values.contains(where: { $0 === path }) else { return }
+                    delivery.removePath(makeSocketAddress(path.address, port.rawValue))
                     onPathValidated?()
                 }
                 path.onAvailability = { [weak self, weak path] available in
@@ -143,7 +148,18 @@ final class WagaNetwork: @unchecked Sendable {
     private func receive(source: String, destination: String, data: Data) {
         if bonding, paths[destination]?.isValidated(source) == true,
            delivery.receive(data, path: destination, remote: source,
-                            now: DispatchTime.now().uptimeNanoseconds) { return }
+                            now: DispatchTime.now().uptimeNanoseconds) {
+            guard connected else { return }
+            let now = DispatchTime.now().uptimeNanoseconds
+            _ = refreshScheduler(destination: source)
+            let confirmed = scheduler.paths.compactMap { score -> String? in
+                guard let state = delivery.paths[score.id], state.receivedPackets >= 3,
+                      now >= state.lastReceived, now - state.lastReceived < WagaDelivery.lifetime else { return nil }
+                return score.id
+            }
+            if handoff.update(confirmed, now: now) { onHandoff?() }
+            return
+        }
         let trustedSource = paths.values.contains { $0.isValidated(source) }
         if bonding, trustedSource, let repairs = recovery.repairs(for: data) {
             for packet in repairs {
@@ -159,19 +175,17 @@ final class WagaNetwork: @unchecked Sendable {
         delivery.expire(now: now)
         let routes = refreshScheduler(destination: destination)
         let media = isRtp(data)
-        if media {
-            scheduler.replace(delivery.preferredPaths(scheduler.paths, bytes: data.count))
+        let selected = media ? delivery.routes(scheduler, bytes: data.count, now: now,
+                                                probing: handoff.probingPath(now: now))
+            : scheduler.select().map { [$0] } ?? []
+        if media, let primary = selected.first { handoff.sent(on: primary, bytes: data.count, now: now) }
+        // Idle-path samples must not make media delivery depend on that path.
+        // Track only the sampled copy: a receipt on the primary cannot prove it arrived.
+        if media, let tracked = selected.last, let remote = routes[tracked] {
+            delivery.record(data, path: tracked, remote: remote, now: now)
         }
-        // Exercise idle interfaces with real media, without duplicating the stream.
-        let feedbackEnabled = delivery.paths.values.contains { $0.confirmed }
-        let idle = media && feedbackEnabled ? scheduler.paths.filter {
-            now - (delivery.paths[$0.id]?.lastSent ?? 0) >= 250_000_000
-        }.min {
-            (delivery.paths[$0.id]?.lastSent ?? 0) < (delivery.paths[$1.id]?.lastSent ?? 0)
-        }?.id : nil
-        if let id = idle ?? scheduler.select(),
-           let path = paths[id], let remote = routes[id] {
-            if media { delivery.record(data, path: id, remote: remote, now: now) }
+        for id in selected {
+            guard let path = paths[id], let remote = routes[id] else { continue }
             path.send(data, to: remote)
         }
     }
@@ -195,7 +209,7 @@ final class WagaNetwork: @unchecked Sendable {
                 smoothedRttMilliseconds: path.smoothedRttMilliseconds,
                 pendingBytes: path.pendingBytes
             )
-            if let state = delivery.paths[id], state.confirmed {
+            if let state = delivery.paths[id] {
                 score.deliveryLoad = Double(state.outstanding) / Double(state.window)
             }
             return score

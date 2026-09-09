@@ -73,6 +73,15 @@ public final class WagaPublisher: @unchecked Sendable {
                 delegate?.wagaPublisherFailed(String(describing: error))
             }
         }
+        network.onHandoff = { [weak self] in
+            guard let self, !stopped else { return }
+            do {
+                try core.restartOnPathChange()
+                drain()
+            } catch {
+                delegate?.wagaPublisherFailed(String(describing: error))
+            }
+        }
         network.onServerReflexiveCandidate = { [weak self] address, base in
             self?.serverReflexiveCandidate(address, base: base)
         }

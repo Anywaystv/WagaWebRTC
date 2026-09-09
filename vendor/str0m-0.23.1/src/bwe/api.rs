@@ -29,6 +29,12 @@ impl<'a> Bwe<'a> {
         self.0.session.request_bwe_path_probe(now);
     }
 
+    /// Restart measurement after the caller moves media to a confirmed new path.
+    /// Retains the current rate as the seed; only fresh feedback can raise it.
+    pub fn restart_on_path_change(&mut self, now: std::time::Instant) {
+        self.0.session.restart_bwe_on_path_change(now);
+    }
+
     /// Configure the desired bitrate.
     ///
     /// Configure the bandwidth estimation system with the desired bitrate.
