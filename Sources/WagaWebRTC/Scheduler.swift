@@ -24,11 +24,10 @@ package struct WagaPathScheduler: Sendable {
         paths = active
     }
 
-    package mutating func select(byteCount: Int) -> String? {
+    package func select() -> String? {
         guard let index = paths.indices.min(by: { score(paths[$0]) < score(paths[$1]) }) else {
             return nil
         }
-        paths[index].pendingBytes += byteCount
         return paths[index].id
     }
 

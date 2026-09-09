@@ -101,11 +101,7 @@ final class WagaCore: @unchecked Sendable {
     }
 
     func createOffer() throws -> String {
-        guard let value = waga_peer_create_offer(peer) else {
-            throw lastError()
-        }
-        defer { waga_string_destroy(value) }
-        return String(cString: value)
+        try takeString(waga_peer_create_offer(peer))
     }
 
     func acceptAnswer(_ sdp: String) throws {
@@ -162,6 +158,10 @@ final class WagaCore: @unchecked Sendable {
         try check(waga_peer_set_desired_bitrate(peer, bitrate))
     }
 
+    func requestPathProbe() throws {
+        try check(waga_peer_request_path_probe(peer))
+    }
+
     func pollTransmit() -> WagaDatagram? {
         var output = WagaTransmit()
         guard waga_peer_poll_transmit(peer, &output),
@@ -209,6 +209,10 @@ final class WagaCore: @unchecked Sendable {
     func pollBitrateEstimate() -> UInt64? {
         var estimate: UInt64 = 0
         return waga_peer_poll_bitrate_estimate(peer, &estimate) ? estimate : nil
+    }
+
+    func bweDiagnosticSnapshot() -> String? {
+        try? takeString(waga_peer_bwe_diagnostic_snapshot(peer))
     }
 
     private func takeString(_ value: UnsafeMutablePointer<CChar>?) throws -> String {

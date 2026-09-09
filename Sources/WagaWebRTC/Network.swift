@@ -10,6 +10,7 @@ final class WagaNetwork: @unchecked Sendable {
     var onServerReflexiveCandidate: ((String, String) -> Void)?
     var onReceive: ((String, String, Data) -> Void)?
     var onError: ((String) -> Void)?
+    var onPathValidated: (() -> Void)?
 
     private let queue: DispatchQueue
     private let monitor = NWPathMonitor()
@@ -43,6 +44,7 @@ final class WagaNetwork: @unchecked Sendable {
     }
 
     func stop() {
+        connected = false
         monitor.cancel()
         paths.values.forEach { $0.stop() }
         paths.removeAll()
@@ -101,6 +103,11 @@ final class WagaNetwork: @unchecked Sendable {
                 }
                 path.onReceive = { [weak self] source, destination, data in
                     self?.receive(source: source, destination: destination, data: data)
+                }
+                path.onValidated = { [weak self, weak path] in
+                    guard let self, let path, bonding, connected,
+                          paths.values.contains(where: { $0 === path }) else { return }
+                    onPathValidated?()
                 }
                 path.onAvailability = { [weak self, weak path] available in
                     guard let self, let path, let port = path.port,
@@ -162,7 +169,7 @@ final class WagaNetwork: @unchecked Sendable {
         }.min {
             (delivery.paths[$0.id]?.lastSent ?? 0) < (delivery.paths[$1.id]?.lastSent ?? 0)
         }?.id : nil
-        if let id = idle ?? scheduler.select(byteCount: data.count),
+        if let id = idle ?? scheduler.select(),
            let path = paths[id], let remote = routes[id] {
             if media { delivery.record(data, path: id, remote: remote, now: now) }
             path.send(data, to: remote)
@@ -209,6 +216,7 @@ final class WagaNetwork: @unchecked Sendable {
 }
 
 private final class WagaPath: @unchecked Sendable {
+    var onValidated: (() -> Void)?
     var onAvailability: ((Bool) -> Void)?
     var remoteIcePassword: String?
     var onReady: ((String) -> Void)?
@@ -340,11 +348,7 @@ private final class WagaPath: @unchecked Sendable {
                     connectionStarted[destination] = DispatchTime.now().uptimeNanoseconds
                 }
             case let .failed(error):
-                health.invalidate(destination)
-                connections.removeValue(forKey: destination)
-                connectionStarted.removeValue(forKey: destination)
-                pending.removeValue(forKey: destination)
-                connection.cancel()
+                discardConnection(destination)
                 onError?("\(interface.name): \(error)")
             default:
                 break
@@ -372,19 +376,19 @@ private final class WagaPath: @unchecked Sendable {
         connectionStarted.removeValue(forKey: key)
         connection.stateUpdateHandler = { [weak self, weak connection] state in
             guard let self, let connection, connections[key] === connection else { return }
-            if case .failed = state {
+            switch state {
+            case .failed, .cancelled:
                 health.invalidate(key)
                 connections.removeValue(forKey: key)
-            } else if case .cancelled = state {
-                health.invalidate(key)
-                connections.removeValue(forKey: key)
-            } else if case .waiting = state {
+            case .waiting:
                 health.invalidate(key)
                 if connectionStarted[key] == nil {
                     connectionStarted[key] = DispatchTime.now().uptimeNanoseconds
                 }
-            } else if case .ready = state {
+            case .ready:
                 connectionStarted.removeValue(forKey: key)
+            default:
+                break
             }
         }
         connection.start(queue: queue)
@@ -408,12 +412,7 @@ private final class WagaPath: @unchecked Sendable {
                 }
             }
             if let error {
-                let destination = connection.endpoint.socketAddress
-                health.invalidate(destination)
-                connections.removeValue(forKey: destination)
-                connectionStarted.removeValue(forKey: destination)
-                pending.removeValue(forKey: destination)
-                connection.cancel()
+                discardConnection(connection.endpoint.socketAddress)
                 onError?("\(interface.name): \(error)")
             } else {
                 receive(connection)
@@ -423,6 +422,14 @@ private final class WagaPath: @unchecked Sendable {
 
     func isValidated(_ destination: String) -> Bool {
         health.isLive(destination, now: DispatchTime.now().uptimeNanoseconds)
+    }
+
+    private func discardConnection(_ destination: String) {
+        health.invalidate(destination)
+        let connection = connections.removeValue(forKey: destination)
+        connectionStarted.removeValue(forKey: destination)
+        pending.removeValue(forKey: destination)
+        connection?.cancel()
     }
 
     func validatedDestination(preferred: String) -> String? {
@@ -443,10 +450,13 @@ private final class WagaPath: @unchecked Sendable {
         else {
             return
         }
-        health.succeeded(source, now: DispatchTime.now().uptimeNanoseconds)
-        reportAvailability(now: DispatchTime.now().uptimeNanoseconds)
-        let sample = Double(DispatchTime.now().uptimeNanoseconds - sent) / 1_000_000
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now >= sent, now - sent < WagaPathHealth.lifetime else { return }
+        let becameLive = health.succeeded(source, now: now)
+        let sample = Double(now - sent) / 1_000_000
         smoothedRttMilliseconds = smoothedRttMilliseconds.map { $0 * 0.8 + sample * 0.2 } ?? sample
+        reportAvailability(now: now)
+        if becameLive { onValidated?() }
     }
 
     private func startProbes() {
@@ -463,10 +473,7 @@ private final class WagaPath: @unchecked Sendable {
             // dead path or making its measured RTT artificially low.
             for (destination, template) in probes {
                 if let started = connectionStarted[destination], now - started >= 5_000_000_000 {
-                    connections.removeValue(forKey: destination)?.cancel()
-                    connectionStarted.removeValue(forKey: destination)
-                    pending.removeValue(forKey: destination)
-                    health.invalidate(destination)
+                    discardConnection(destination)
                 }
                 guard let request = makeIceProbe(template, password: remoteIcePassword),
                       let transaction = stunTransaction(request) else { continue }
@@ -486,10 +493,11 @@ private final class WagaPath: @unchecked Sendable {
         probeRequests.removeValue(forKey: transaction)
         let now = DispatchTime.now().uptimeNanoseconds
         guard now - probe.sent < WagaPathHealth.lifetime else { return true }
-        health.succeeded(source, now: now)
-        reportAvailability(now: now)
+        let becameLive = health.succeeded(source, now: now)
         let sample = Double(now - probe.sent) / 1_000_000
         smoothedRttMilliseconds = smoothedRttMilliseconds.map { $0 * 0.8 + sample * 0.2 } ?? sample
+        reportAvailability(now: now)
+        if becameLive { onValidated?() }
         return true
     }
 

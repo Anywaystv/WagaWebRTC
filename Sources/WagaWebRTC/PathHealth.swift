@@ -6,9 +6,12 @@ struct WagaPathHealth {
     private var everSucceeded = false
     private var available = true
 
-    mutating func succeeded(_ destination: String, now: UInt64) {
+    @discardableResult
+    mutating func succeeded(_ destination: String, now: UInt64) -> Bool {
+        let wasLive = lastSuccess.keys.contains { isLive($0, now: now) }
         lastSuccess[destination] = now
         everSucceeded = true
+        return !wasLive
     }
 
     mutating func invalidate(_ destination: String) {
@@ -30,6 +33,6 @@ struct WagaPathHealth {
 
     func destination(preferred: String, candidates: [String], now: UInt64) -> String? {
         if isLive(preferred, now: now) { return preferred }
-        return candidates.sorted().first { isLive($0, now: now) }
+        return candidates.lazy.filter { isLive($0, now: now) }.min()
     }
 }

@@ -2,16 +2,34 @@ import XCTest
 @testable import WagaWebRTC
 
 final class BitrateRampTests: XCTestCase {
+    func testConfirmedBandwidthRecoversFromFloorWithinFourSeconds() {
+        var ramp = WagaBitrateRamp()
+        var current: UInt64 = 5_000_000
+        ramp.observe(ceiling: 250_000, now: 0)
+        current = ramp.next(current: current, target: 5_000_000, maximumIncrease: 250_000, now: 0)!
+        XCTAssertEqual(current, 250_000)
+        for tick in 1...200 {
+            let now = UInt64(tick) * 20_000_000
+            if tick % 10 == 0 { ramp.observe(ceiling: 5_000_000, now: now) }
+            if let next = ramp.next(current: current, target: 5_000_000, maximumIncrease: 250_000, now: now) {
+                XCTAssertLessThanOrEqual(next - current, 250_000)
+                XCTAssertLessThanOrEqual(next, 5_000_000)
+                current = next
+            }
+        }
+        XCTAssertEqual(current, 5_000_000)
+    }
+
     func testIncreaseCadenceAndFreshness() {
         var ramp = WagaBitrateRamp()
         XCTAssertNil(ramp.next(current: 250_000, target: 5_000_000, maximumIncrease: 250_000, now: 0))
         ramp.observe(ceiling: 5_000_000, now: 0)
-        XCTAssertEqual(ramp.next(current: 250_000, target: 5_000_000, maximumIncrease: 250_000, now: 0), 358_333)
-        for tick in 1..<20 {
-            XCTAssertNil(ramp.next(current: 358_333, target: 5_000_000, maximumIncrease: 250_000, now: UInt64(tick) * 20_000_000))
+        XCTAssertEqual(ramp.next(current: 250_000, target: 5_000_000, maximumIncrease: 250_000, now: 0), 500_000)
+        for tick in 1..<10 {
+            XCTAssertNil(ramp.next(current: 500_000, target: 5_000_000, maximumIncrease: 250_000, now: UInt64(tick) * 20_000_000))
         }
-        XCTAssertEqual(ramp.next(current: 358_333, target: 5_000_000, maximumIncrease: 250_000, now: 400_000_000), 470_277)
-        XCTAssertNil(ramp.next(current: 470_277, target: 5_000_000, maximumIncrease: 250_000, now: 1_000_000_001))
+        XCTAssertEqual(ramp.next(current: 500_000, target: 5_000_000, maximumIncrease: 250_000, now: 200_000_000), 750_000)
+        XCTAssertNil(ramp.next(current: 750_000, target: 5_000_000, maximumIncrease: 250_000, now: 1_000_000_001))
     }
 
     func testCeilingTargetAndStepCap() {
@@ -34,6 +52,7 @@ final class BitrateRampTests: XCTestCase {
         XCTAssertEqual(ramp.next(current: 3_000_000, target: 5_000_000, maximumIncrease: 250_000, now: 220_000_000), 250_000)
         ramp.observe(ceiling: 5_000_000, now: 240_000_000)
         XCTAssertNil(ramp.next(current: 250_000, target: 5_000_000, maximumIncrease: 250_000, now: 240_000_000))
-        XCTAssertNotNil(ramp.next(current: 250_000, target: 5_000_000, maximumIncrease: 250_000, now: 620_000_000))
+        XCTAssertNil(ramp.next(current: 250_000, target: 5_000_000, maximumIncrease: 250_000, now: 419_999_999))
+        XCTAssertEqual(ramp.next(current: 250_000, target: 5_000_000, maximumIncrease: 250_000, now: 420_000_000), 500_000)
     }
 }

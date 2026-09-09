@@ -2,6 +2,39 @@
 import XCTest
 
 final class PathHealthTests: XCTestCase {
+    func testFallbackSelectionPreservesOrderingAndPreferredRoute() {
+        var health = WagaPathHealth()
+        health.succeeded("a", now: 0)
+        health.succeeded("b", now: 0)
+        health.succeeded("c", now: WagaPathHealth.lifetime)
+        XCTAssertEqual(health.destination(preferred: "missing", candidates: ["b", "z", "a"], now: 1), "a")
+        XCTAssertEqual(health.destination(preferred: "b", candidates: ["a", "b"], now: 1), "b")
+        XCTAssertEqual(health.destination(preferred: "a", candidates: ["a", "b", "c"],
+                                          now: WagaPathHealth.lifetime), "c")
+        XCTAssertNil(health.destination(preferred: "missing", candidates: [], now: 1))
+    }
+
+    func testPathProbeDoesNotEnableAdaptiveBitrateForStandardPeers() throws {
+        let sender = try WagaCore(audio: .opus, video: .h264)
+        let receiver = try WagaCore(receiver: ())
+        for peer in [sender, receiver] {
+            try peer.requestPathProbe()
+            XCTAssertNil(peer.pollBitrateEstimate())
+        }
+    }
+
+    func testValidationSignalsRecoveryWithoutWaitingForAvailabilityTimer() {
+        var health = WagaPathHealth()
+        XCTAssertTrue(health.succeeded("server", now: 0))
+        XCTAssertFalse(health.succeeded("server", now: 1))
+        XCTAssertFalse(health.succeeded("other", now: 2))
+        XCTAssertTrue(health.succeeded("server", now: WagaPathHealth.lifetime + 2))
+        XCTAssertFalse(health.succeeded("other", now: WagaPathHealth.lifetime + 3))
+        health.invalidate("server")
+        health.invalidate("other")
+        XCTAssertTrue(health.succeeded("server", now: WagaPathHealth.lifetime + 4))
+    }
+
     func testAvailabilityTracksRepeatedOutagesWithoutWithdrawingGatheringCandidate() {
         var health = WagaPathHealth()
         XCTAssertNil(health.availabilityChange(now: 0))

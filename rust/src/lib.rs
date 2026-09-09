@@ -365,6 +365,15 @@ impl Publisher {
         self.rtc.bwe().set_desired_bitrate(Bitrate::bps(bitrate));
     }
 
+    pub fn request_path_probe(&mut self) -> Result<(), String> {
+        let now = Instant::now();
+        self.rtc.bwe().request_path_probe(now);
+        self.rtc
+            .handle_input(Input::Timeout(now))
+            .map_err(|error| error.to_string())?;
+        self.drain_at(now)
+    }
+
     pub fn poll_transmit(&mut self) -> Option<Transmit> {
         self.output.pop_front()
     }
@@ -379,6 +388,10 @@ impl Publisher {
 
     pub fn poll_bitrate_estimate(&mut self) -> Option<u64> {
         self.bitrate_estimates.pop_front()
+    }
+
+    pub fn bwe_diagnostic_snapshot(&mut self) -> String {
+        self.rtc.bwe().diagnostic_snapshot(Instant::now())
     }
 
     fn drain(&mut self) -> Result<(), String> {

@@ -307,6 +307,11 @@ pub extern "C" fn waga_peer_set_desired_bitrate(peer: *mut WagaPeer, bitrate: u6
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn waga_peer_request_path_probe(peer: *mut WagaPeer) -> bool {
+    run(peer, |peer| peer.publisher.request_path_probe())
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn waga_peer_poll_transmit(peer: *mut WagaPeer, output: *mut WagaTransmit) -> bool {
     let Ok(peer) = peer_mut(peer) else {
         return false;
@@ -383,6 +388,26 @@ pub extern "C" fn waga_peer_poll_bitrate_estimate(peer: *mut WagaPeer, output: *
     *output = estimate;
 
     true
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn waga_peer_bwe_diagnostic_snapshot(peer: *mut WagaPeer) -> *mut c_char {
+    make_string(peer, |peer| Ok(peer.publisher.bwe_diagnostic_snapshot()))
+}
+
+#[cfg(test)]
+#[test]
+fn diagnostic_snapshot_handles_null_and_owned_string() {
+    assert!(waga_peer_bwe_diagnostic_snapshot(ptr::null_mut()).is_null());
+    let peer = waga_peer_create(3, 1);
+    assert!(!peer.is_null());
+    let snapshot = waga_peer_bwe_diagnostic_snapshot(peer);
+    assert!(!snapshot.is_null());
+    unsafe {
+        assert_eq!(CStr::from_ptr(snapshot).to_str().unwrap(), "bwe=disabled");
+        waga_string_destroy(snapshot);
+        waga_peer_destroy(peer);
+    }
 }
 
 fn make_string(

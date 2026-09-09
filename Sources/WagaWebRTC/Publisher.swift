@@ -6,10 +6,12 @@ public protocol WagaPublisherDelegate: AnyObject {
     func wagaPublisherNeedsKeyframe()
     func wagaPublisherBitrateEstimate(_ bitrate: UInt64)
     func wagaPublisherFailed(_ message: String)
+    func wagaPublisherDiagnostic(_ message: String)
 }
 
 public extension WagaPublisherDelegate {
     func wagaPublisherBitrateEstimate(_: UInt64) {}
+    func wagaPublisherDiagnostic(_: String) {}
 }
 
 public final class WagaPublisher: @unchecked Sendable {
@@ -24,6 +26,8 @@ public final class WagaPublisher: @unchecked Sendable {
     private var stopped = false
     private var offerScheduled = false
     private let gatheringDelayMilliseconds: Int
+    private let diagnostics: Bool
+    private var lastDiagnostic: UInt64 = 0
 
     public init(
         audio: WagaCodec = .opus,
@@ -32,9 +36,11 @@ public final class WagaPublisher: @unchecked Sendable {
         iceServers: [String] = [],
         connectionPriorities: WagaConnectionPriorities = .init(),
         targetBitrate: UInt64? = nil,
+        diagnostics: Bool = false,
         delegate: (any WagaPublisherDelegate)? = nil
     ) throws {
         self.delegate = delegate
+        self.diagnostics = diagnostics
         gatheringDelayMilliseconds = iceServers.isEmpty ? 150 : 1_000
         core = try WagaCore(audio: audio, video: video, targetBitrate: targetBitrate)
         network = WagaNetwork(
@@ -57,6 +63,15 @@ public final class WagaPublisher: @unchecked Sendable {
         }
         network.onReceive = { [weak self] source, destination, data in
             self?.receive(source: source, destination: destination, data: data)
+        }
+        network.onPathValidated = { [weak self] in
+            guard let self, !stopped else { return }
+            do {
+                try core.requestPathProbe()
+                drain()
+            } catch {
+                delegate?.wagaPublisherFailed(String(describing: error))
+            }
         }
         network.onServerReflexiveCandidate = { [weak self] address, base in
             self?.serverReflexiveCandidate(address, base: base)
@@ -185,6 +200,9 @@ public final class WagaPublisher: @unchecked Sendable {
                 network.setConnected(true)
                 delegate?.wagaPublisherConnected()
             case .disconnected, .closed:
+                if diagnostics {
+                    delegate?.wagaPublisherDiagnostic("transport_event=\(event)")
+                }
                 network.setConnected(false)
                 delegate?.wagaPublisherDisconnected()
             case .keyframeRequest:
@@ -193,6 +211,15 @@ public final class WagaPublisher: @unchecked Sendable {
         }
         while let estimate = core.pollBitrateEstimate() {
             delegate?.wagaPublisherBitrateEstimate(estimate)
+        }
+        if diagnostics {
+            let now = DispatchTime.now().uptimeNanoseconds
+            if now - lastDiagnostic >= 1_000_000_000 {
+                lastDiagnostic = now
+                if let snapshot = core.bweDiagnosticSnapshot() {
+                    delegate?.wagaPublisherDiagnostic(snapshot)
+                }
+            }
         }
         scheduleTimeout()
     }

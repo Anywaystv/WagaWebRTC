@@ -18,6 +18,17 @@ pub enum BweKind {
 pub struct Bwe<'a>(pub(crate) &'a mut Rtc);
 
 impl<'a> Bwe<'a> {
+    /// Read-only recovery diagnostics. Contains no addresses or credentials.
+    pub fn diagnostic_snapshot(&self, now: std::time::Instant) -> String {
+        self.0.session.bwe_diagnostic_snapshot(now)
+    }
+
+    /// Request a rate-limited probe after the caller authenticates a usable path.
+    /// Keeps the estimate and congestion state; this does not assert extra capacity.
+    pub fn request_path_probe(&mut self, now: std::time::Instant) {
+        self.0.session.request_bwe_path_probe(now);
+    }
+
     /// Configure the desired bitrate.
     ///
     /// Configure the bandwidth estimation system with the desired bitrate.

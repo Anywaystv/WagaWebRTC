@@ -27,8 +27,8 @@ public struct WagaBitrateRamp: Sendable {
             return limit
         }
         guard limit > current else { return nil }
-        if let increasedAt, now < increasedAt || now - increasedAt < 400_000_000 { return nil }
-        let step = min(maximumIncrease, 100_000 + current / 30)
+        if let increasedAt, now < increasedAt || now - increasedAt < 200_000_000 { return nil }
+        let step = maximumIncrease
         guard step > 0 else { return nil }
         increasedAt = now
         return current + min(step, limit - current)

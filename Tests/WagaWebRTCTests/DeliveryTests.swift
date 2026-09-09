@@ -88,10 +88,23 @@ final class DeliveryTests: XCTestCase {
         cell.deliveryLoad = 0.1
         var scheduler = WagaPathScheduler()
         scheduler.replace([wifi, cell])
-        XCTAssertEqual(scheduler.select(byteCount: 1200), "cell")
+        XCTAssertEqual(scheduler.select(), "cell")
         wifi.deliveryLoad = 0
         scheduler.replace([wifi, cell])
-        XCTAssertEqual(scheduler.select(byteCount: 1200), "wifi")
+        XCTAssertEqual(scheduler.select(), "wifi")
+    }
+
+    func testSchedulerUsesRefreshedPendingBytesWithoutMutatingSnapshot() {
+        var scheduler = WagaPathScheduler()
+        XCTAssertNil(scheduler.select())
+        var wifi = WagaPathScore(id: "wifi", priority: 1, smoothedRttMilliseconds: 5, pendingBytes: 0)
+        let cell = WagaPathScore(id: "cell", priority: 1, smoothedRttMilliseconds: 5, pendingBytes: 1200)
+        scheduler.replace([wifi, cell])
+        XCTAssertEqual(scheduler.select(), "wifi")
+        XCTAssertEqual(scheduler.paths, [wifi, cell])
+        wifi.pendingBytes = 2400
+        scheduler.replace([wifi, cell])
+        XCTAssertEqual(scheduler.select(), "cell")
     }
 
     private func receiptFor(_ packet: Data) -> Data {
@@ -110,7 +123,7 @@ final class DeliveryTests: XCTestCase {
         for index in 0 ..< 200 {
             let packet = Data(repeating: UInt8(index), count: 1200)
             scheduler.replace(delivery.preferredPaths([cell], bytes: packet.count))
-            XCTAssertEqual(scheduler.select(byteCount: packet.count), "cell")
+            XCTAssertEqual(scheduler.select(), "cell")
             delivery.record(packet, path: "cell", remote: "server", now: UInt64(index + 3))
         }
         XCTAssertFalse(delivery.allows("cell", bytes: 1200))

@@ -188,7 +188,7 @@ impl RateControl {
         // WebRTC limits increases to 1.5x observed throughput to avoid unlimited growth
         // when we're already above what we're actually sending
         // See: aimd_rate_control.cc line 251-252
-        let increase_limit = observed_bitrate * 1.5 + Bitrate::kbps(10);
+        let increase_limit = observed_bitrate * MAX_ESTIMATE_RATIO + Bitrate::kbps(10);
 
         if self.estimated_bitrate >= increase_limit {
             // WebRTC updates time_last_bitrate_change_ even when skipping increase
@@ -238,9 +238,9 @@ impl RateControl {
             self.estimated_bitrate.as_f64() + increase
         };
 
-        // Cap at the increase limit (and observed bitrate ratio)
-        let max = observed_bitrate.as_f64() * MAX_ESTIMATE_RATIO;
-        new_estimate = max.min(new_estimate).min(increase_limit.as_f64());
+        // Use the same ceiling as the guard above; a second, lower ceiling
+        // could turn a normal-signal increase into a reduction.
+        new_estimate = new_estimate.min(increase_limit.as_f64());
 
         self.update_estimate(new_estimate.into(), now);
     }
@@ -292,7 +292,7 @@ impl RateControl {
     fn estimated_packet_size(&self) -> f64 {
         // Assume 30 FPS video dominates the send rate
         let bits_per_frame = self.estimated_bitrate.as_f64() / 30.0;
-        let packets_per_frame = (bits_per_frame / (1200.0 / 8.0)).ceil();
+        let packets_per_frame = (bits_per_frame / (1200.0 * 8.0)).ceil();
 
         bits_per_frame / packets_per_frame
     }
@@ -407,6 +407,21 @@ mod test {
         }
 
         #[test]
+        fn normal_signal_does_not_reduce_estimate_near_throughput_limit() {
+            let now = Instant::now();
+            let mut control = make_control(305_000);
+            control.update(Signal::Normal, 200_000.into(), None, now);
+            assert!(control.estimated_bitrate().as_u64() >= 305_000);
+            assert!(control.estimated_bitrate().as_u64() <= 310_000);
+        }
+
+        #[test]
+        fn packet_size_uses_bits_per_1200_byte_packet() {
+            let control = make_control(288_000);
+            assert_eq!(control.estimated_packet_size(), 9_600.0);
+        }
+
+        #[test]
         fn test_initial_estimate() {
             let rate_controller = make_control(100_000);
 
@@ -514,7 +529,8 @@ mod test {
 
             // NB: Additive increase because we are nearing convergence
             rate_controller.update(Signal::Normal, 70_000.into(), None, now + duration_ms(3500));
-            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 72552);
+            // Half of one frame's bits: 71552 / 30 / 2, rounded down.
+            assert_eq!(rate_controller.estimated_bitrate().as_u64(), 72744);
         }
     }
 

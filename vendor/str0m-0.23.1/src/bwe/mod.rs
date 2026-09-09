@@ -61,6 +61,14 @@ pub struct Bwe {
 }
 
 impl Bwe {
+    pub fn diagnostic_snapshot(&self, now: Instant) -> String {
+        format!("estimate={:?} desired={} overuse={} delay_feedback_age_ms={:?} {} {}",
+            self.last_estimate(), self.desired_bitrate.as_f64(), self.is_overusing(),
+            self.bwe.delay_controller.feedback_age_ms(now),
+            self.bwe.loss_controller.diagnostic_snapshot(now),
+            self.bwe.probe_control.diagnostic_snapshot(now))
+    }
+
     pub fn new(initial: Bitrate) -> Self {
         let send_side_bwe = SendSideBandwidthEstimator::new(initial);
         Bwe {
@@ -131,6 +139,10 @@ impl Bwe {
 
     pub fn set_desired_bitrate(&mut self, v: Bitrate) {
         self.desired_bitrate = v;
+    }
+
+    pub fn request_path_probe(&mut self, now: Instant) {
+        self.bwe.probe_control.request_path_probe(now);
     }
 }
 
