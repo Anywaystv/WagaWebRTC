@@ -78,6 +78,10 @@ python3 - "$artifact" <<'PY'
 import os, sys
 from pathlib import Path
 prefixes = [str(Path.home()), str(Path.cwd()), os.environ.get('CARGO_HOME', ''), os.environ.get('RUSTUP_HOME', '')]
+for framework in Path(sys.argv[1]).glob('*/CWagaWebRTC.framework'):
+    for name in ('LICENSE', 'THIRD_PARTY_NOTICES.txt'):
+        if not (framework / name).is_file() or not (framework / name).stat().st_size:
+            sys.exit('Release rejected: missing ' + name)
 for path in Path(sys.argv[1]).rglob('*'):
     if path.is_file():
         data = path.read_bytes()
