@@ -94,19 +94,11 @@ fn run(peer: *mut WagaPeer, operation: impl FnOnce(&mut WagaPeer) -> Result<(), 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn waga_peer_create(audio_codec: i32, video_codec: i32) -> *mut WagaPeer {
-    catch_unwind(|| {
+    create_peer(|| {
         let audio = decode_codec(audio_codec).ok()?;
         let video = decode_codec(video_codec).ok()?;
-        Some(Box::into_raw(Box::new(WagaPeer {
-            publisher: Publisher::new(audio, video).ok()?,
-            last_error: CString::default(),
-            transmit: None,
-            media: None,
-        })))
+        Publisher::new(audio, video).ok()
     })
-    .ok()
-    .flatten()
-    .unwrap_or(ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
@@ -116,31 +108,23 @@ pub extern "C" fn waga_peer_create_with_bwe(
     initial_bitrate: u64,
     desired_bitrate: u64,
 ) -> *mut WagaPeer {
-    catch_unwind(|| {
+    create_peer(|| {
         let audio = decode_codec(audio_codec).ok()?;
         let video = decode_codec(video_codec).ok()?;
-        Some(Box::into_raw(Box::new(WagaPeer {
-            publisher: Publisher::new_with_bwe(
-                audio,
-                video,
-                Some(initial_bitrate),
-                Some(desired_bitrate),
-            )
-            .ok()?,
-            last_error: CString::default(),
-            transmit: None,
-            media: None,
-        })))
+        Publisher::new_with_bwe(audio, video, Some(initial_bitrate), Some(desired_bitrate)).ok()
     })
-    .ok()
-    .flatten()
-    .unwrap_or(ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn waga_receiver_create() -> *mut WagaPeer {
+    create_peer(|| Publisher::new_receiver().ok())
+}
+
+fn create_peer(
+    create: impl FnOnce() -> Option<Publisher> + std::panic::UnwindSafe,
+) -> *mut WagaPeer {
     catch_unwind(|| {
-        Publisher::new_receiver().ok().map(|publisher| {
+        create().map(|publisher| {
             Box::into_raw(Box::new(WagaPeer {
                 publisher,
                 last_error: CString::default(),
@@ -182,6 +166,19 @@ pub extern "C" fn waga_peer_add_local_candidate(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn waga_peer_remove_local_candidate(
+    peer: *mut WagaPeer,
+    address: *const c_char,
+) -> bool {
+    run(peer, |peer| {
+        let address = text(address)?
+            .parse()
+            .map_err(|error| format!("invalid candidate: {error}"))?;
+        peer.publisher.remove_local_candidate(address)
+    })
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn waga_peer_add_server_reflexive_candidate(
     peer: *mut WagaPeer,
     address: *const c_char,
@@ -200,15 +197,7 @@ pub extern "C" fn waga_peer_add_server_reflexive_candidate(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn waga_peer_create_offer(peer: *mut WagaPeer) -> *mut c_char {
-    let mut offer = ptr::null_mut();
-    let ok = run(peer, |peer| {
-        let sdp = peer.publisher.create_offer()?;
-        offer = CString::new(sdp)
-            .map_err(|error| error.to_string())?
-            .into_raw();
-        Ok(())
-    });
-    if ok { offer } else { ptr::null_mut() }
+    make_string(peer, |peer| peer.publisher.create_offer())
 }
 
 #[unsafe(no_mangle)]
@@ -294,6 +283,16 @@ pub extern "C" fn waga_peer_set_desired_bitrate(peer: *mut WagaPeer, bitrate: u6
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn waga_peer_request_path_probe(peer: *mut WagaPeer) -> bool {
+    run(peer, |peer| peer.publisher.request_path_probe())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn waga_peer_restart_on_path_change(peer: *mut WagaPeer) -> bool {
+    run(peer, |peer| peer.publisher.restart_on_path_change())
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn waga_peer_poll_transmit(peer: *mut WagaPeer, output: *mut WagaTransmit) -> bool {
     let Ok(peer) = peer_mut(peer) else {
         return false;
@@ -370,6 +369,26 @@ pub extern "C" fn waga_peer_poll_bitrate_estimate(peer: *mut WagaPeer, output: *
     *output = estimate;
 
     true
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn waga_peer_bwe_diagnostic_snapshot(peer: *mut WagaPeer) -> *mut c_char {
+    make_string(peer, |peer| Ok(peer.publisher.bwe_diagnostic_snapshot()))
+}
+
+#[cfg(test)]
+#[test]
+fn diagnostic_snapshot_handles_null_and_owned_string() {
+    assert!(waga_peer_bwe_diagnostic_snapshot(ptr::null_mut()).is_null());
+    let peer = waga_peer_create(3, 1);
+    assert!(!peer.is_null());
+    let snapshot = waga_peer_bwe_diagnostic_snapshot(peer);
+    assert!(!snapshot.is_null());
+    unsafe {
+        assert_eq!(CStr::from_ptr(snapshot).to_str().unwrap(), "bwe=disabled");
+        waga_string_destroy(snapshot);
+        waga_peer_destroy(peer);
+    }
 }
 
 fn make_string(

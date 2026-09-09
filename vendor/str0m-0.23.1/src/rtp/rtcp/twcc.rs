@@ -1226,12 +1226,13 @@ impl TwccSendRegister {
             }
 
             let apply_report_counter = if let Some(rr) = r.recv_report {
-                // This packed was already acked and handled before so carry
-                // over previous apply_report_counter, so it won't be included
-                // in the current apply_report() call result.
-                rr.remote_recv_time
-                    .map(|_| rr.apply_report_counter)
-                    .unwrap_or_else(|| apply_report_counter)
+                // Only a missing-to-received transition is new feedback.
+                // Repeated gaps must not count the same loss again.
+                if rr.remote_recv_time.is_some() || remote_recv_time.is_none() {
+                    rr.apply_report_counter
+                } else {
+                    apply_report_counter
+                }
             } else {
                 apply_report_counter
             };
@@ -2243,6 +2244,25 @@ mod test {
             // 7 is acked in the last report
             assert_eq!(acked_packets, [3, 7]);
         }
+    }
+
+    #[test]
+    fn repeated_missing_feedback_is_not_new_loss() {
+        let now = Instant::now();
+        let mut sender = TwccSendRegister::new(100);
+        let mut receiver = TwccRecvRegister::new(100);
+        for seq in 1..=4 {
+            sender.register_seq(TwccPacketId::new(seq), now, 1200);
+        }
+        receiver.update_seq(1.into(), now);
+        receiver.update_seq(4.into(), now + Duration::from_millis(10));
+        let report = receiver.build_report(1500).unwrap();
+        assert_eq!(sender.apply_report(report.clone(), now).unwrap().count(), 4);
+        assert_eq!(sender.apply_report(report, now + Duration::from_millis(100)).unwrap().count(), 0);
+        receiver.update_seq(2.into(), now + Duration::from_millis(120));
+        let recovered = sender.apply_report(receiver.build_report(1500).unwrap(), now + Duration::from_millis(150))
+            .unwrap().map(|r| (r.seq().as_u16(), r.remote_recv_time().is_some())).collect::<Vec<_>>();
+        assert_eq!(recovered, vec![(2, true)]);
     }
 
     #[test]

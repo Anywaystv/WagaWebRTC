@@ -8,7 +8,7 @@ WagaWebRTC is a Swift framework built on the [str0m WebRTC library](https://gith
 
 [str0m](https://github.com/algesten/str0m) provides the WebRTC core: SDP, ICE, DTLS, SRTP, RTP packetization, NACK, and RTCP. Its Sans I/O design leaves network operations to the application. WagaWebRTC adds the Swift/C bridge, per-interface UDP sockets through Network.framework, path selection, and shared-history packet recovery.
 
-Credit to the str0m authors and contributors. We use a pinned copy of str0m 0.23.1 with a local experimental AAC patch; see the [patch notes](vendor/README.md). For the upstream library, see the [str0m repository](https://github.com/algesten/str0m) and [API documentation](https://docs.rs/str0m).
+Credit to the str0m authors and contributors. We use a pinned copy of str0m 0.23.1 with local AAC and low-motion probing patches; see the [patch notes](vendor/README.md). For the upstream library, see the [str0m repository](https://github.com/algesten/str0m) and [API documentation](https://docs.rs/str0m).
 
 ## Usage
 
@@ -28,13 +28,35 @@ publisher.acceptAnswer(answerSdp)
 publisher.send(codec: .h264, mediaTime: timestamp90k, data: accessUnit)
 ```
 
-Use `.bonded` with Wagastrim. It validates every ICE path, measures STUN RTT, and sends encrypted RTP/RTCP over the lowest-latency candidate that is not backed up, spilling onto another physical interface when needed. A shared 4096-packet history is available to every path. Wagastrim can request an exact encrypted packet from that history, and the retry is sent over the healthiest path at that moment instead of the path used originally. Use `.standard` for an ordinary WHIP service that only expects media on the nominated ICE pair.
+Use `.bonded` with Wagastrim. Validated paths use receiver delivery receipts to limit outstanding RTP traffic and shift packets toward available paths. Idle interfaces receive an occasional media packet to check delivery. Without receipts, the existing RTT/socket-backlog scheduler remains in use. A shared 4096-packet history lets repairs use another healthy path. RTCP stays on str0m's selected route. Use `.standard` for an ordinary WHIP service that expects media on the nominated ICE pair.
+
+Delivery windows cover unique encrypted RTP packets, not parity or duplicate repairs. Missing receipts expire after one second and reduce that path's allowance; this adds no playout delay. Windows guide route preference: if all validated paths are full, packets still use the best available route instead of being discarded. str0m still controls the total sending rate. Cellular playback and handover behavior require live verification.
 
 Bonded publishing also sends one XOR parity datagram after each group of eight encrypted RTP packets. Wagastrim can reconstruct one missing audio or video packet once that parity arrives without waiting for a round trip. If a group loses more than one packet, it requests the remaining packets from the shared history. The parity overhead is about 12.5% of media traffic.
 
 Set `targetBitrate` to enable transport-wide congestion control. The delegate receives bandwidth estimates through `wagaPublisherBitrateEstimate(_:)`; the publisher must lower its media encoder rate when that estimate falls.
 
+Sender-side BWE, padding probes and ALR detection use str0m's controller. Probes
+test for more bandwidth, including during low-motion video; the WHIP receiver
+must negotiate RTX and return TWCC feedback. Keep the desired rate at the user's
+configured target, and adapt the encoder to the latest estimate. Probes and
+bonding recovery add traffic above the media bitrate; a 5 Mbps target cannot
+guarantee 5 Mbps on a slower connection. See [str0m's BWE notes](vendor/str0m-0.23.1/docs/BWE.md).
+
 The app owns HTTP signaling and encoding. Create one publisher or receiver per session and call `stop()` before releasing it. Delegate callbacks run on the peer's queue, not the main queue. Timestamps use codec clock ticks: 90 kHz for video, 48 kHz for audio (960 samples per 20 ms Opus packet, 1024 per AAC-LC frame).
+
+An established publisher keeps its session for up to 15 seconds after ICE reports
+a disconnect, allowing network recovery without a new WHIP request. Bonded path
+sockets retry independently; a socket stuck connecting is replaced after 5 seconds.
+Removed interfaces invalidate their host and mapped ICE candidates immediately.
+Bonded paths also withdraw silent candidates when their health checks expire and
+restore them after an authenticated reply. Each interface uses a validated receiver
+address, so cellular can use the public endpoint while Wi-Fi uses a LAN endpoint.
+Receive failures discard the affected socket so the path can be recreated.
+Unsent media is discarded during recovery instead of accumulating a stale backlog.
+Successful ICE recovery cancels teardown. A closed peer or expired recovery window
+still notifies the app to reconnect. This cannot hide an outage longer than the
+receiver's playout buffer or keep a session the server has already closed.
 
 ## Local verification
 

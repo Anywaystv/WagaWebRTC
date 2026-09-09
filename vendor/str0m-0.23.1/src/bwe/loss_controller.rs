@@ -751,6 +751,28 @@ impl LossController {
         self.state = state;
     }
 
+    pub(super) fn diagnostic_snapshot(&self, now: Instant) -> String {
+        let observation = match self.last_send_time_most_recent_observation {
+            Timestamp::Exact(time) => Some(time),
+            _ => None,
+        };
+        let deadline = match self.last_hold_info.timestamp {
+            Timestamp::Exact(time) => Some(time),
+            _ => None,
+        };
+        format!(
+            "loss_state={:?} loss_bps={} delay_bps={} acked_bps={} hold_wall_ms={:?} hold_observation_ms={:?} next_hold_ms={} observation_age_ms={:?}",
+            self.state,
+            self.current_estimate.loss_limited_bandwidth.as_f64(),
+            self.delay_based_estimate.as_f64(),
+            self.acknowledged_bitrate.as_f64(),
+            deadline.map(|time| time.saturating_duration_since(now).as_millis()),
+            deadline.zip(observation).map(|(end, start)| end.saturating_duration_since(start).as_millis()),
+            self.last_hold_info.duration.as_millis(),
+            observation.map(|time| now.saturating_duration_since(time).as_millis()),
+        )
+    }
+
     fn get_high_bandwidth_bias(&self, bandwidth: Bitrate) -> f64 {
         if !bandwidth.is_valid() {
             return 0.0;
@@ -1101,12 +1123,81 @@ impl PacketResult for &TwccSendRecord {
 
 #[cfg(test)]
 mod test {
+    #[test]
+    fn diagnostic_hold_distinguishes_stale_observations_from_wall_time() {
+        let now = std::time::Instant::now();
+        let mut controller = super::LossController::new();
+        controller.state = super::LossControllerState::Decreasing;
+        controller.last_send_time_most_recent_observation = super::Timestamp::Exact(now);
+        controller.last_hold_info.timestamp = super::Timestamp::Exact(now + std::time::Duration::from_secs(60));
+        let later = now + std::time::Duration::from_secs(61);
+        let snapshot = controller.diagnostic_snapshot(later);
+        assert!(snapshot.contains("loss_state=Decreasing"));
+        assert!(snapshot.contains("hold_wall_ms=Some(0)"));
+        assert!(snapshot.contains("hold_observation_ms=Some(60000)"));
+        assert!(snapshot.contains("observation_age_ms=Some(61000)"));
+        assert_eq!(snapshot, controller.diagnostic_snapshot(later));
+        assert_eq!(controller.state, super::LossControllerState::Decreasing);
+    }
+
     use std::time::Instant;
 
     use fastrand::Rng;
     use systemstat::Duration;
 
     use super::{Bitrate, DataSize, LossBasedBweResult, LossController, LossControllerState};
+
+    #[test]
+    fn probing_resumes_when_loss_clears_at_unchanged_bitrate() {
+        for recovered in [LossControllerState::Increasing, LossControllerState::DelayBased] {
+            let mut bwe = super::super::SendSideBandwidthEstimator::new(Bitrate::kbps(250));
+            let now = Instant::now();
+            bwe.probe_control.enable(true);
+            bwe.probe_control.set_desired_bitrate(Bitrate::mbps(5));
+            bwe.loss_controller.state = LossControllerState::Decreasing;
+            bwe.propagate_estimate();
+            assert!(bwe.probe_control.handle_timeout(now).is_none());
+
+            bwe.loss_controller.state = recovered;
+            bwe.propagate_estimate();
+            assert_eq!(bwe.last_estimate(), Some(Bitrate::kbps(250)));
+            assert!(bwe.probe_control.handle_timeout(now + Duration::from_secs(1)).is_some());
+        }
+    }
+
+    #[test]
+    fn recovery_probe_resumes_after_established_stream_stalls() {
+        let mut bwe = super::super::SendSideBandwidthEstimator::new(Bitrate::kbps(250));
+        let now = Instant::now();
+        bwe.probe_control.enable(true);
+        bwe.probe_control.set_desired_bitrate(Bitrate::mbps(5));
+        bwe.propagate_estimate();
+        assert!(bwe.probe_control.handle_timeout(now).is_some());
+        assert!(bwe.probe_control.handle_timeout(now).is_some());
+        assert!(bwe.probe_control.handle_timeout(now).is_none());
+
+        bwe.loss_controller.state = LossControllerState::Decreasing;
+        bwe.propagate_estimate();
+        assert!(bwe.probe_control.handle_timeout(now + Duration::from_secs(2)).is_none());
+        bwe.loss_controller.state = LossControllerState::DelayBased;
+        bwe.propagate_estimate();
+        let probe = bwe.probe_control.handle_timeout(now + Duration::from_secs(16))
+            .expect("stagnation recovery must resume after congestion clears");
+        assert_eq!(probe.target_bitrate(), Bitrate::kbps(500));
+    }
+
+    #[test]
+    fn probing_stops_when_loss_starts_at_unchanged_bitrate() {
+        let mut bwe = super::super::SendSideBandwidthEstimator::new(Bitrate::kbps(250));
+        bwe.probe_control.enable(true);
+        bwe.probe_control.set_desired_bitrate(Bitrate::mbps(5));
+        bwe.propagate_estimate();
+        bwe.loss_controller.state = LossControllerState::Decreasing;
+        bwe.propagate_estimate();
+        assert_eq!(bwe.last_estimate(), Some(Bitrate::kbps(250)));
+        assert!(bwe.probe_control.handle_timeout(Instant::now()).is_none());
+    }
+
     struct PacketResult {
         local_send_time: Instant,
         size: DataSize,
@@ -1160,6 +1251,22 @@ mod test {
             "Estimate should increase to delay based estimate, but not further"
         );
         assert_eq!(state, LossControllerState::DelayBased);
+    }
+
+    #[test]
+    fn recovery_from_low_estimate_with_fresh_lossless_delivery() {
+        let now = Instant::now();
+        let mut lbc = LossController::new();
+        lbc.set_bandwidth_estimate(Bitrate::bps(150_314));
+        lbc.state = LossControllerState::Decreasing;
+        lbc.set_acknowledged_bitrate(Bitrate::mbps(1));
+        let mut builder = PacketBuilder::new(now).num_packets(26);
+        for _ in 0..20 {
+            lbc.update_bandwidth_estimate(&builder.build_packets(), Bitrate::bps(736_369));
+            builder = builder.forward_time(Duration::from_millis(300));
+        }
+        assert!(lbc.loss_based_result().bandwidth_estimate.unwrap() > Bitrate::kbps(500));
+        assert_ne!(lbc.state, LossControllerState::Decreasing);
     }
 
     #[test]

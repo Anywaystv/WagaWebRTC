@@ -1164,6 +1164,30 @@ impl Session {
         }
     }
 
+    pub fn request_bwe_path_probe(&mut self, now: Instant) {
+        if let Some(bwe) = self.bwe.as_mut() {
+            bwe.request_path_probe(now);
+        }
+    }
+
+    pub fn restart_bwe_on_path_change(&mut self, now: Instant) {
+        let Some(initial) = self.bwe.as_mut().and_then(|bwe| bwe.restart_on_path_change(now)) else {
+            return;
+        };
+        // Old probe clusters and pacing debt belong to the previous path.
+        // Media queues and the RTP/ICE session remain intact.
+        self.pacer = PacerImpl::leaky_bucket(initial);
+        #[cfg(feature = "_internal_test_exports")]
+        { self.pending_probe = None; }
+        self.configure_pacer();
+        self.update_queue_state(now);
+    }
+
+    pub fn bwe_diagnostic_snapshot(&self, now: Instant) -> String {
+        self.bwe.as_ref().map(|bwe| bwe.diagnostic_snapshot(now))
+            .unwrap_or_else(|| "bwe=disabled".into())
+    }
+
     #[allow(dead_code)]
     pub fn line_count(&self) -> usize {
         self.medias.len() + if self.app.is_some() { 1 } else { 0 }

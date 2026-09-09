@@ -57,22 +57,37 @@ pub struct Bwe {
     bwe: SendSideBandwidthEstimator,
     desired_bitrate: Bitrate,
     smoother: EstimateSmoother,
+    feedback_pending: bool,
+    path_started_at: Option<Instant>,
 }
 
 impl Bwe {
+    pub fn diagnostic_snapshot(&self, now: Instant) -> String {
+        format!("estimate={:?} desired={} overuse={} delay_feedback_age_ms={:?} {} {}",
+            self.last_estimate(), self.desired_bitrate.as_f64(), self.is_overusing(),
+            self.bwe.delay_controller.feedback_age_ms(now),
+            self.bwe.loss_controller.diagnostic_snapshot(now),
+            self.bwe.probe_control.diagnostic_snapshot(now))
+    }
+
     pub fn new(initial: Bitrate) -> Self {
         let send_side_bwe = SendSideBandwidthEstimator::new(initial);
         Bwe {
             bwe: send_side_bwe,
             desired_bitrate: Bitrate::ZERO,
             smoother: EstimateSmoother::new(),
+            feedback_pending: false,
+            path_started_at: None,
         }
     }
 
     pub fn handle_timeout(&mut self, now: Instant, do_probe: bool) -> Option<ProbeClusterConfig> {
         let result = self.bwe.handle_timeout(self.desired_bitrate, do_probe, now);
-        if let Some(estimate) = self.bwe.last_estimate() {
-            self.smoother.record(now, estimate);
+        if self.feedback_pending {
+            self.feedback_pending = false;
+            if let Some(estimate) = self.bwe.last_estimate() {
+                self.smoother.record(now, estimate);
+            }
         }
         result
     }
@@ -87,6 +102,18 @@ impl Bwe {
 
     pub fn reset(&mut self, init_bitrate: Bitrate) {
         self.bwe.reset(init_bitrate);
+        self.smoother = EstimateSmoother::new();
+        self.feedback_pending = false;
+    }
+
+    pub fn restart_on_path_change(&mut self, now: Instant) -> Option<Bitrate> {
+        let initial = self.last_estimate()?.min(self.desired_bitrate);
+        if initial.is_zero() {
+            return None;
+        }
+        self.reset(initial);
+        self.path_started_at = Some(now);
+        Some(initial)
     }
 
     pub fn update<'t>(
@@ -94,6 +121,14 @@ impl Bwe {
         records: impl Iterator<Item = &'t crate::rtp_::TwccSendRecord>,
         now: Instant,
     ) {
+        let path_started_at = self.path_started_at;
+        let mut records = records.filter(move |record| {
+            path_started_at.is_none_or(|start| record.local_send_time() >= start)
+        }).peekable();
+        if path_started_at.is_some() && records.peek().is_none() {
+            return;
+        }
+        self.feedback_pending |= records.peek().is_some();
         self.bwe.update(records, now);
     }
 
@@ -122,6 +157,10 @@ impl Bwe {
 
     pub fn set_desired_bitrate(&mut self, v: Bitrate) {
         self.desired_bitrate = v;
+    }
+
+    pub fn request_path_probe(&mut self, now: Instant) {
+        self.bwe.probe_control.request_path_probe(now);
     }
 }
 
@@ -333,14 +372,14 @@ impl SendSideBandwidthEstimator {
         let Some(estimate) = self.last_estimate() else {
             return;
         };
+        // Congestion can clear (or start) without changing the numeric estimate.
+        let cause = self.bandwidth_limited_cause();
+        self.probe_control.set_estimated_bitrate(estimate, cause);
+
         // Did it change?
         if self.last_updated_estimate == Some(estimate) {
             return;
         }
-
-        let cause = self.bandwidth_limited_cause();
-
-        self.probe_control.set_estimated_bitrate(estimate, cause);
         self.alr_detector.set_estimated_bitrate(estimate);
 
         // Don't update until this changes.
@@ -482,5 +521,94 @@ impl fmt::Display for BandwidthUsage {
             BandwidthUsage::Normal => write!(f, "normal"),
             BandwidthUsage::Underuse => write!(f, "underuse"),
         }
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+    use crate::rtp_::TwccPacketId;
+
+    #[test]
+    fn handoff_reprobes_from_low_rate_without_old_feedback_or_hold() {
+        let start = Instant::now();
+        let mut bwe = Bwe::new(Bitrate::kbps(250));
+        bwe.set_desired_bitrate(Bitrate::mbps(6));
+        bwe.handle_timeout(start, true);
+        bwe.handle_timeout(start, true);
+        bwe.bwe.probe_control.set_estimated_bitrate(
+            Bitrate::kbps(250), BandwidthLimitedCause::LossLimitedBwe,
+        );
+        bwe.request_path_probe(start + Duration::from_secs(2));
+        assert!(bwe.bwe.probe_control.handle_timeout(start + Duration::from_secs(2)).is_none());
+
+        let handoff = start + Duration::from_secs(3);
+        assert_eq!(bwe.restart_on_path_change(handoff), Some(Bitrate::kbps(250)));
+        assert_eq!(bwe.last_estimate(), Some(Bitrate::kbps(250)));
+        assert_eq!(bwe.poll_estimate(), None);
+        let old = TwccSendRecord::test_new(
+            TwccPacketId::with_cluster(1u64, 1u64), start, 1200, handoff, None,
+        );
+        bwe.update([&old].into_iter(), handoff);
+        assert_eq!(bwe.bwe.delay_controller.feedback_age_ms(handoff), None);
+        assert_eq!(bwe.bwe.started_at, None);
+
+        let mut now = handoff;
+        let mut sequence = 100u64;
+        for _ in 0..8 {
+            let config = bwe.handle_timeout(now, true).expect("fresh handoff must probe promptly");
+            assert!(bwe.start_probe(config, now));
+            let spacing = Duration::from_secs_f64(9600.0 / config.target_bitrate().as_f64());
+            let records: Vec<_> = (0..32).map(|index| {
+                let sent = now + spacing * index;
+                sequence += 1;
+                TwccSendRecord::test_new(
+                    TwccPacketId::with_cluster(sequence, config.cluster()), sent,
+                    1200, sent + Duration::from_millis(20), Some(sent + Duration::from_millis(10)),
+                )
+            }).collect();
+            now += spacing * 32 + Duration::from_millis(20);
+            bwe.update(records.iter().chain([&old]), now);
+            bwe.end_probe(now, config.cluster());
+            if bwe.last_estimate().unwrap() >= Bitrate::mbps(6) { break; }
+        }
+        assert!(bwe.last_estimate().unwrap() >= Bitrate::mbps(6));
+        assert!(now.duration_since(handoff) < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn handoff_without_feedback_does_not_raise_estimate() {
+        let now = Instant::now();
+        let mut bwe = Bwe::new(Bitrate::kbps(250));
+        bwe.set_desired_bitrate(Bitrate::mbps(6));
+        bwe.restart_on_path_change(now);
+        for tick in 0..200 {
+            bwe.handle_timeout(now + Duration::from_millis(tick * 25), true);
+            assert_eq!(bwe.last_estimate(), Some(Bitrate::kbps(250)));
+            assert_eq!(bwe.poll_estimate(), None);
+        }
+    }
+
+    #[test]
+    fn handoff_still_reacts_to_loss_on_the_new_path() {
+        let now = Instant::now();
+        let mut bwe = Bwe::new(Bitrate::mbps(2));
+        bwe.set_desired_bitrate(Bitrate::mbps(6));
+        bwe.restart_on_path_change(now);
+        for batch in 0..20u64 {
+            let records: Vec<_> = (0..50u64).map(|index| {
+                let seq = batch * 50 + index;
+                let sent = now + Duration::from_millis(seq * 10);
+                TwccSendRecord::test_new(
+                    TwccPacketId::with_cluster(seq, 999u64), sent, 1200,
+                    sent + Duration::from_millis(20),
+                    (index % 5 == 0).then_some(sent + Duration::from_millis(10)),
+                )
+            }).collect();
+            let time = now + Duration::from_millis((batch + 1) * 500 + 20);
+            bwe.update(records.iter(), time);
+            bwe.handle_timeout(time, true);
+        }
+        assert!(bwe.last_estimate().unwrap() < Bitrate::mbps(2));
     }
 }

@@ -859,6 +859,13 @@ impl StreamTx {
                     break 'outer;
                 };
 
+                // Tiny frames (for example a static camera) cannot fill a probe
+                // cluster efficiently. Use blank padding instead of repeatedly
+                // retransmitting a few payload bytes at the pacer's packet limit.
+                if pkt.payload.len() < MIN_SPURIOUS_PADDING_SIZE {
+                    break 'outer;
+                }
+
                 let orig_seq_no = pkt.seq_no;
                 let seq_no = self.seq_no_rtx.inc();
 
@@ -1201,6 +1208,11 @@ impl StreamTx {
                 assert!(self.padding_enabled());
             }
         }
+    }
+
+    /// Discard unsent media after a transport outage, retaining RTX history.
+    pub fn discard_queued_media(&mut self) {
+        self.send_queue.clear();
     }
 
     pub(crate) fn reset_buffers(&mut self) {

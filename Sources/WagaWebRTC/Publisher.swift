@@ -6,10 +6,12 @@ public protocol WagaPublisherDelegate: AnyObject {
     func wagaPublisherNeedsKeyframe()
     func wagaPublisherBitrateEstimate(_ bitrate: UInt64)
     func wagaPublisherFailed(_ message: String)
+    func wagaPublisherDiagnostic(_ message: String)
 }
 
 public extension WagaPublisherDelegate {
     func wagaPublisherBitrateEstimate(_: UInt64) {}
+    func wagaPublisherDiagnostic(_: String) {}
 }
 
 public final class WagaPublisher: @unchecked Sendable {
@@ -21,8 +23,11 @@ public final class WagaPublisher: @unchecked Sendable {
     private var timeout: DispatchSourceTimer?
     private var offerCompletion: (@Sendable (Result<String, Error>) -> Void)?
     private var offered = false
+    private var stopped = false
     private var offerScheduled = false
     private let gatheringDelayMilliseconds: Int
+    private let diagnostics: Bool
+    private var lastDiagnostic: UInt64 = 0
 
     public init(
         audio: WagaCodec = .opus,
@@ -31,9 +36,11 @@ public final class WagaPublisher: @unchecked Sendable {
         iceServers: [String] = [],
         connectionPriorities: WagaConnectionPriorities = .init(),
         targetBitrate: UInt64? = nil,
+        diagnostics: Bool = false,
         delegate: (any WagaPublisherDelegate)? = nil
     ) throws {
         self.delegate = delegate
+        self.diagnostics = diagnostics
         gatheringDelayMilliseconds = iceServers.isEmpty ? 150 : 1_000
         core = try WagaCore(audio: audio, video: video, targetBitrate: targetBitrate)
         network = WagaNetwork(
@@ -45,8 +52,35 @@ public final class WagaPublisher: @unchecked Sendable {
         network.onCandidate = { [weak self] candidate in
             self?.candidate(candidate)
         }
+        network.onCandidateRemoved = { [weak self] candidate in
+            guard let self, !stopped else { return }
+            do {
+                try core.removeLocalCandidate(candidate)
+                drain()
+            } catch {
+                delegate?.wagaPublisherFailed(String(describing: error))
+            }
+        }
         network.onReceive = { [weak self] source, destination, data in
             self?.receive(source: source, destination: destination, data: data)
+        }
+        network.onPathValidated = { [weak self] in
+            guard let self, !stopped else { return }
+            do {
+                try core.requestPathProbe()
+                drain()
+            } catch {
+                delegate?.wagaPublisherFailed(String(describing: error))
+            }
+        }
+        network.onHandoff = { [weak self] in
+            guard let self, !stopped else { return }
+            do {
+                try core.restartOnPathChange()
+                drain()
+            } catch {
+                delegate?.wagaPublisherFailed(String(describing: error))
+            }
         }
         network.onServerReflexiveCandidate = { [weak self] address, base in
             self?.serverReflexiveCandidate(address, base: base)
@@ -81,6 +115,7 @@ public final class WagaPublisher: @unchecked Sendable {
 
     public func send(codec: WagaCodec, mediaTime: UInt64, data: Data) {
         queue.async {
+            guard !self.stopped else { return }
             do {
                 try self.core.send(codec: codec, mediaTime: mediaTime, data: data)
                 self.drain()
@@ -103,6 +138,7 @@ public final class WagaPublisher: @unchecked Sendable {
 
     public func stop() {
         queue.async {
+            self.stopped = true
             self.timeout?.cancel()
             self.timeout = nil
             self.offerCompletion = nil
@@ -111,6 +147,7 @@ public final class WagaPublisher: @unchecked Sendable {
     }
 
     private func candidate(_ candidate: String) {
+        guard !stopped else { return }
         do {
             try core.addLocalCandidate(candidate)
             if !offered, !offerScheduled, offerCompletion != nil {
@@ -128,6 +165,7 @@ public final class WagaPublisher: @unchecked Sendable {
     }
 
     private func serverReflexiveCandidate(_ candidate: String, base: String) {
+        guard !stopped else { return }
         do {
             try core.addServerReflexiveCandidate(candidate, base: base)
             drain()
@@ -151,6 +189,7 @@ public final class WagaPublisher: @unchecked Sendable {
     }
 
     private func receive(source: String, destination: String, data: Data) {
+        guard !stopped else { return }
         do {
             try core.receive(source: source, destination: destination, data: data)
             drain()
@@ -160,6 +199,7 @@ public final class WagaPublisher: @unchecked Sendable {
     }
 
     private func drain() {
+        guard !stopped else { return }
         while let datagram = core.pollTransmit() {
             network.send(datagram)
         }
@@ -169,6 +209,9 @@ public final class WagaPublisher: @unchecked Sendable {
                 network.setConnected(true)
                 delegate?.wagaPublisherConnected()
             case .disconnected, .closed:
+                if diagnostics {
+                    delegate?.wagaPublisherDiagnostic("transport_event=\(event)")
+                }
                 network.setConnected(false)
                 delegate?.wagaPublisherDisconnected()
             case .keyframeRequest:
@@ -177,6 +220,15 @@ public final class WagaPublisher: @unchecked Sendable {
         }
         while let estimate = core.pollBitrateEstimate() {
             delegate?.wagaPublisherBitrateEstimate(estimate)
+        }
+        if diagnostics {
+            let now = DispatchTime.now().uptimeNanoseconds
+            if now - lastDiagnostic >= 1_000_000_000 {
+                lastDiagnostic = now
+                if let snapshot = core.bweDiagnosticSnapshot() {
+                    delegate?.wagaPublisherDiagnostic(snapshot)
+                }
+            }
         }
         scheduleTimeout()
     }
@@ -187,7 +239,7 @@ public final class WagaPublisher: @unchecked Sendable {
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + .milliseconds(Int(milliseconds)))
         timer.setEventHandler { [weak self] in
-            guard let self else { return }
+            guard let self, !stopped else { return }
             do {
                 try core.handleTimeout()
                 drain()

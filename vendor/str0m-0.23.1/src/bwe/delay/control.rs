@@ -61,6 +61,10 @@ impl DelayController {
         probe_bitrate: Option<Bitrate>,
         now: Instant,
     ) -> Option<Bitrate> {
+        // Missing-only or duplicate feedback provides no new arrival-time evidence.
+        if acked.is_empty() && probe_bitrate.is_none() {
+            return self.last_estimate;
+        }
         let mut max_rtt = None;
 
         for acked_packet in acked {
@@ -137,6 +141,11 @@ impl DelayController {
     /// Get the latest estimate.
     pub fn last_estimate(&self) -> Option<Bitrate> {
         self.last_estimate
+    }
+
+    pub(crate) fn feedback_age_ms(&self, now: Instant) -> Option<u128> {
+        (self.last_twcc_report != already_happened())
+            .then(|| now.saturating_duration_since(self.last_twcc_report).as_millis())
     }
 
     /// Whether the delay-based detector currently signals overuse.
@@ -222,5 +231,25 @@ impl DelayController {
                 .map(|rtt| rtt * 2)
                 .unwrap_or(MAX_TWCC_GAP)
                 .min(UPDATE_INTERVAL * 2)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn empty_feedback_does_not_refresh_delay_evidence() {
+        let now = Instant::now();
+        let mut controller = DelayController::new(Bitrate::mbps(5));
+        controller.last_twcc_report = now;
+        let later = now + Duration::from_secs(16);
+        assert_eq!(controller.update(&[], Some(Bitrate::kbps(250)), None, later),
+                   Some(Bitrate::mbps(5)));
+        assert_eq!(controller.last_twcc_report, now);
+        assert!(!controller.trendline_hypothesis_valid(later));
+        controller.handle_timeout(Some(Bitrate::kbps(250)), later);
+        assert!(controller.poll_timeout() > later);
+        assert_eq!(controller.last_estimate(), Some(Bitrate::mbps(5)));
     }
 }
