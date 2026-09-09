@@ -1117,10 +1117,16 @@ mod tests {
 
     fn check_video_delivery(handoff: bool) {
         let mut publisher = if handoff {
-            Publisher::new_with_bwe(Some(Codec::Opus), Some(Codec::H264), Some(250_000), Some(6_000_000))
+            Publisher::new_with_bwe(
+                Some(Codec::Opus),
+                Some(Codec::H264),
+                Some(250_000),
+                Some(6_000_000),
+            )
         } else {
             Publisher::new(Some(Codec::Opus), Some(Codec::H264))
-        }.unwrap();
+        }
+        .unwrap();
         let mut receiver = Publisher::new_receiver().unwrap();
         publisher
             .add_local_candidate("127.0.0.1:40000".parse().unwrap())

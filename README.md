@@ -70,7 +70,7 @@ Allow `aac_ingest` through the Mac firewall if prompted. After 60 seconds the re
 
 ## iOS artifact
 
-Requires full Xcode with Swift 6 and Rust installed through rustup. Select Xcode with `xcode-select`, then run:
+Requires full Xcode with Swift 6, Python 3, and Rust installed through rustup. Select Xcode with `xcode-select`, then run:
 
 ```sh
 ./scripts/build-xcframework.sh
@@ -79,6 +79,10 @@ Requires full Xcode with Swift 6 and Rust installed through rustup. Select Xcode
 This produces `Artifacts/CWagaWebRTC.xcframework` for iPhone and simulator using str0m's Apple CryptoKit backend. `Package.swift` detects the artifact automatically, so the repository can be added to Moblin as one local Swift package. `WagaPublisher` handles outgoing WHIP; `WagaReceiver` handles WHEP and incoming WHIP offers.
 
 Build the artifact before adding the local package to Xcode. Prebuilt binaries are not included. Scripts use your existing Rust installation; `WAGA_TOOLCHAIN_DIR` optionally selects a directory containing `rustup/` and `cargo/`.
+
+Each framework includes the project license and generated dependency notices.
+Keep these files when redistributing the XCFramework. The build remaps local
+source paths and rejects artifacts that still contain the checked build paths.
 
 ## Scope
 
