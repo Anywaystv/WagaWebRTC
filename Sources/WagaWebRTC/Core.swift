@@ -87,6 +87,10 @@ final class WagaCore: @unchecked Sendable {
         try check(address.withCString { waga_peer_add_local_candidate(peer, $0) })
     }
 
+    func removeLocalCandidate(_ address: String) throws {
+        try check(address.withCString { waga_peer_remove_local_candidate(peer, $0) })
+    }
+
     func addServerReflexiveCandidate(_ address: String, base: String) throws {
         let result = address.withCString { address in
             base.withCString { base in

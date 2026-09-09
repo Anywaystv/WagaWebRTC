@@ -57,6 +57,7 @@ pub struct Bwe {
     bwe: SendSideBandwidthEstimator,
     desired_bitrate: Bitrate,
     smoother: EstimateSmoother,
+    feedback_pending: bool,
 }
 
 impl Bwe {
@@ -66,13 +67,17 @@ impl Bwe {
             bwe: send_side_bwe,
             desired_bitrate: Bitrate::ZERO,
             smoother: EstimateSmoother::new(),
+            feedback_pending: false,
         }
     }
 
     pub fn handle_timeout(&mut self, now: Instant, do_probe: bool) -> Option<ProbeClusterConfig> {
         let result = self.bwe.handle_timeout(self.desired_bitrate, do_probe, now);
-        if let Some(estimate) = self.bwe.last_estimate() {
-            self.smoother.record(now, estimate);
+        if self.feedback_pending {
+            self.feedback_pending = false;
+            if let Some(estimate) = self.bwe.last_estimate() {
+                self.smoother.record(now, estimate);
+            }
         }
         result
     }
@@ -87,6 +92,8 @@ impl Bwe {
 
     pub fn reset(&mut self, init_bitrate: Bitrate) {
         self.bwe.reset(init_bitrate);
+        self.smoother = EstimateSmoother::new();
+        self.feedback_pending = false;
     }
 
     pub fn update<'t>(
@@ -94,6 +101,8 @@ impl Bwe {
         records: impl Iterator<Item = &'t crate::rtp_::TwccSendRecord>,
         now: Instant,
     ) {
+        let mut records = records.peekable();
+        self.feedback_pending |= records.peek().is_some();
         self.bwe.update(records, now);
     }
 
@@ -333,14 +342,14 @@ impl SendSideBandwidthEstimator {
         let Some(estimate) = self.last_estimate() else {
             return;
         };
+        // Congestion can clear (or start) without changing the numeric estimate.
+        let cause = self.bandwidth_limited_cause();
+        self.probe_control.set_estimated_bitrate(estimate, cause);
+
         // Did it change?
         if self.last_updated_estimate == Some(estimate) {
             return;
         }
-
-        let cause = self.bandwidth_limited_cause();
-
-        self.probe_control.set_estimated_bitrate(estimate, cause);
         self.alr_detector.set_estimated_bitrate(estimate);
 
         // Don't update until this changes.

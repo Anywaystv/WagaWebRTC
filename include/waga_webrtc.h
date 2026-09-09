@@ -56,6 +56,7 @@ WagaPeer *waga_receiver_create(void);
 void waga_peer_destroy(WagaPeer *peer);
 const char *waga_peer_last_error(WagaPeer *peer);
 bool waga_peer_add_local_candidate(WagaPeer *peer, const char *address);
+bool waga_peer_remove_local_candidate(WagaPeer *peer, const char *address);
 bool waga_peer_add_server_reflexive_candidate(
     WagaPeer *peer,
     const char *address,

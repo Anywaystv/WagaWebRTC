@@ -182,6 +182,19 @@ pub extern "C" fn waga_peer_add_local_candidate(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn waga_peer_remove_local_candidate(
+    peer: *mut WagaPeer,
+    address: *const c_char,
+) -> bool {
+    run(peer, |peer| {
+        let address = text(address)?
+            .parse()
+            .map_err(|error| format!("invalid candidate: {error}"))?;
+        peer.publisher.remove_local_candidate(address)
+    })
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn waga_peer_add_server_reflexive_candidate(
     peer: *mut WagaPeer,
     address: *const c_char,

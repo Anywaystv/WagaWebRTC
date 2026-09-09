@@ -1107,6 +1107,58 @@ mod test {
     use systemstat::Duration;
 
     use super::{Bitrate, DataSize, LossBasedBweResult, LossController, LossControllerState};
+
+    #[test]
+    fn probing_resumes_when_loss_clears_at_unchanged_bitrate() {
+        for recovered in [LossControllerState::Increasing, LossControllerState::DelayBased] {
+            let mut bwe = super::super::SendSideBandwidthEstimator::new(Bitrate::kbps(250));
+            let now = Instant::now();
+            bwe.probe_control.enable(true);
+            bwe.probe_control.set_desired_bitrate(Bitrate::mbps(5));
+            bwe.loss_controller.state = LossControllerState::Decreasing;
+            bwe.propagate_estimate();
+            assert!(bwe.probe_control.handle_timeout(now).is_none());
+
+            bwe.loss_controller.state = recovered;
+            bwe.propagate_estimate();
+            assert_eq!(bwe.last_estimate(), Some(Bitrate::kbps(250)));
+            assert!(bwe.probe_control.handle_timeout(now + Duration::from_secs(1)).is_some());
+        }
+    }
+
+    #[test]
+    fn recovery_probe_resumes_after_established_stream_stalls() {
+        let mut bwe = super::super::SendSideBandwidthEstimator::new(Bitrate::kbps(250));
+        let now = Instant::now();
+        bwe.probe_control.enable(true);
+        bwe.probe_control.set_desired_bitrate(Bitrate::mbps(5));
+        bwe.propagate_estimate();
+        assert!(bwe.probe_control.handle_timeout(now).is_some());
+        assert!(bwe.probe_control.handle_timeout(now).is_some());
+        assert!(bwe.probe_control.handle_timeout(now).is_none());
+
+        bwe.loss_controller.state = LossControllerState::Decreasing;
+        bwe.propagate_estimate();
+        assert!(bwe.probe_control.handle_timeout(now + Duration::from_secs(2)).is_none());
+        bwe.loss_controller.state = LossControllerState::DelayBased;
+        bwe.propagate_estimate();
+        let probe = bwe.probe_control.handle_timeout(now + Duration::from_secs(16))
+            .expect("stagnation recovery must resume after congestion clears");
+        assert_eq!(probe.target_bitrate(), Bitrate::kbps(500));
+    }
+
+    #[test]
+    fn probing_stops_when_loss_starts_at_unchanged_bitrate() {
+        let mut bwe = super::super::SendSideBandwidthEstimator::new(Bitrate::kbps(250));
+        bwe.probe_control.enable(true);
+        bwe.probe_control.set_desired_bitrate(Bitrate::mbps(5));
+        bwe.propagate_estimate();
+        bwe.loss_controller.state = LossControllerState::Decreasing;
+        bwe.propagate_estimate();
+        assert_eq!(bwe.last_estimate(), Some(Bitrate::kbps(250)));
+        assert!(bwe.probe_control.handle_timeout(Instant::now()).is_none());
+    }
+
     struct PacketResult {
         local_send_time: Instant,
         size: DataSize,

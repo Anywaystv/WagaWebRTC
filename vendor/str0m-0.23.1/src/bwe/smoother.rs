@@ -1,96 +1,84 @@
-use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::rtp_::Bitrate;
 
-/// Time window for averaging estimate changes.
-const ESTIMATE_WINDOW: Duration = Duration::from_secs(3);
+const EMIT_INTERVAL: Duration = Duration::from_millis(200);
 
-type TimeBitrate = (Instant, Bitrate);
-
-const TOLERANCE: f64 = 0.05;
-
-/// Smooths BWE estimates by averaging over a time window.
+/// Rate-limits encoder notifications without averaging the controller a second time.
 pub struct EstimateSmoother {
-    estimates: VecDeque<TimeBitrate>,
-    maybe_emit: bool,
-    emitted: Option<Bitrate>,
+    pending: Option<(Instant, Bitrate)>,
+    emitted: Option<(Instant, Bitrate)>,
 }
 
 impl EstimateSmoother {
     pub fn new() -> Self {
         Self {
-            estimates: VecDeque::new(),
-            maybe_emit: false,
+            pending: None,
             emitted: None,
         }
     }
 
-    /// Record a new estimate and update the smoothed average.
     pub fn record(&mut self, now: Instant, estimate: Bitrate) {
-        // Did value change from previous?
-        let do_update = self.estimates.back().map(|b| b.1) != Some(estimate);
-
-        if do_update {
-            self.maybe_emit = true;
-            self.estimates.push_back((now, estimate));
-        }
-
-        // Remove entries older than the window.
-        while let Some((time, _)) = self.estimates.front() {
-            if now.duration_since(*time) > ESTIMATE_WINDOW {
-                // Keep last entry
-                if self.estimates.len() == 1 {
-                    break;
-                }
-
-                self.maybe_emit = true;
-                self.estimates.pop_front();
-            } else {
-                break;
-            }
-        }
+        self.pending = Some((now, estimate));
     }
 
-    /// Poll for an estimate to emit. Returns Some only when there's a new value to emit.
     pub fn poll(&mut self) -> Option<Bitrate> {
-        if !self.maybe_emit {
-            return None;
+        let (now, rate) = self.pending?;
+        if let Some((last, previous)) = self.emitted {
+            if rate >= previous && now.saturating_duration_since(last) < EMIT_INTERVAL {
+                return None;
+            }
         }
-
-        if self.estimates.is_empty() {
-            return None;
-        }
-
-        let total: f64 = self.estimates.iter().map(|b| b.1.as_f64()).sum();
-        let avg = total / self.estimates.len() as f64;
-        let rate: Bitrate = avg.into();
-
-        // This forces emitting if we have the first ever value, or a last
-        // where the rest of the window is gone (estimates stop coming).
-        let force = self.estimates.len() == 1 && self.emitted != Some(rate);
-
-        // Emit if we deviate enough from previously emitted.
-        let deviate = if let Some(emitted) = self.emitted {
-            !in_tolerance(emitted, rate)
-        } else {
-            true
-        };
-
-        self.maybe_emit = false;
-
-        // Are we not to emit?
-        if !force && !deviate {
-            return None;
-        }
-
-        self.emitted = Some(rate);
+        self.pending = None;
+        self.emitted = Some((now, rate));
         Some(rate)
     }
 }
 
-fn in_tolerance(b1: Bitrate, b2: Bitrate) -> bool {
-    let min = b1 * (1.0 - TOLERANCE);
-    let max = b1 * (1.0 + TOLERANCE);
-    b2 > min && b2 < max
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stable_feedback_refreshes_but_polling_does_not() {
+        let now = Instant::now();
+        let rate = Bitrate::from(500_000.0);
+        let mut smoother = EstimateSmoother::new();
+        smoother.record(now, rate);
+        assert_eq!(smoother.poll(), Some(rate));
+        assert_eq!(smoother.poll(), None);
+        smoother.record(now + Duration::from_millis(20), rate);
+        assert_eq!(smoother.poll(), None);
+        smoother.record(now + EMIT_INTERVAL, rate);
+        assert_eq!(smoother.poll(), Some(rate));
+        assert_eq!(smoother.poll(), None);
+    }
+
+    #[test]
+    fn decreases_are_immediate_and_increases_are_not_averaged() {
+        let now = Instant::now();
+        let low = Bitrate::from(250_000.0);
+        let high = Bitrate::from(5_000_000.0);
+        let mut smoother = EstimateSmoother::new();
+        smoother.record(now, high);
+        assert_eq!(smoother.poll(), Some(high));
+        smoother.record(now + Duration::from_millis(20), low);
+        assert_eq!(smoother.poll(), Some(low));
+        smoother.record(now + Duration::from_millis(40), high);
+        assert_eq!(smoother.poll(), None);
+        smoother.record(now + Duration::from_millis(220), high);
+        assert_eq!(smoother.poll(), Some(high));
+    }
+
+    #[test]
+    fn timeouts_without_feedback_do_not_refresh_encoder_estimates() {
+        let now = Instant::now();
+        let mut bwe = super::super::Bwe::new(Bitrate::from(500_000.0));
+        for tick in 0..100 {
+            let time = now + Duration::from_millis(tick * 20);
+            bwe.update(std::iter::empty(), time);
+            bwe.handle_timeout(time, false);
+            assert_eq!(bwe.poll_estimate(), None);
+        }
+    }
 }

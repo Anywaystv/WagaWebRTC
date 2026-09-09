@@ -5,6 +5,7 @@ package struct WagaPathScore: Equatable, Sendable {
     var priority: Double
     var smoothedRttMilliseconds: Double?
     var pendingBytes: Int
+    var deliveryLoad: Double?
 
     package init(id: String, priority: Double, smoothedRttMilliseconds: Double?, pendingBytes: Int) {
         self.id = id
@@ -32,6 +33,9 @@ package struct WagaPathScheduler: Sendable {
     }
 
     private func score(_ path: WagaPathScore) -> Double {
+        if let load = path.deliveryLoad {
+            return (load + 0.01) / max(path.priority, 0.01)
+        }
         let rttMilliseconds = path.smoothedRttMilliseconds ?? 100
         return (Double(path.pendingBytes) + rttMilliseconds * 1_500) / max(path.priority, 0.01)
     }
