@@ -94,19 +94,11 @@ fn run(peer: *mut WagaPeer, operation: impl FnOnce(&mut WagaPeer) -> Result<(), 
 
 #[unsafe(no_mangle)]
 pub extern "C" fn waga_peer_create(audio_codec: i32, video_codec: i32) -> *mut WagaPeer {
-    catch_unwind(|| {
+    create_peer(|| {
         let audio = decode_codec(audio_codec).ok()?;
         let video = decode_codec(video_codec).ok()?;
-        Some(Box::into_raw(Box::new(WagaPeer {
-            publisher: Publisher::new(audio, video).ok()?,
-            last_error: CString::default(),
-            transmit: None,
-            media: None,
-        })))
+        Publisher::new(audio, video).ok()
     })
-    .ok()
-    .flatten()
-    .unwrap_or(ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
@@ -116,31 +108,23 @@ pub extern "C" fn waga_peer_create_with_bwe(
     initial_bitrate: u64,
     desired_bitrate: u64,
 ) -> *mut WagaPeer {
-    catch_unwind(|| {
+    create_peer(|| {
         let audio = decode_codec(audio_codec).ok()?;
         let video = decode_codec(video_codec).ok()?;
-        Some(Box::into_raw(Box::new(WagaPeer {
-            publisher: Publisher::new_with_bwe(
-                audio,
-                video,
-                Some(initial_bitrate),
-                Some(desired_bitrate),
-            )
-            .ok()?,
-            last_error: CString::default(),
-            transmit: None,
-            media: None,
-        })))
+        Publisher::new_with_bwe(audio, video, Some(initial_bitrate), Some(desired_bitrate)).ok()
     })
-    .ok()
-    .flatten()
-    .unwrap_or(ptr::null_mut())
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn waga_receiver_create() -> *mut WagaPeer {
+    create_peer(|| Publisher::new_receiver().ok())
+}
+
+fn create_peer(
+    create: impl FnOnce() -> Option<Publisher> + std::panic::UnwindSafe,
+) -> *mut WagaPeer {
     catch_unwind(|| {
-        Publisher::new_receiver().ok().map(|publisher| {
+        create().map(|publisher| {
             Box::into_raw(Box::new(WagaPeer {
                 publisher,
                 last_error: CString::default(),
@@ -213,15 +197,7 @@ pub extern "C" fn waga_peer_add_server_reflexive_candidate(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn waga_peer_create_offer(peer: *mut WagaPeer) -> *mut c_char {
-    let mut offer = ptr::null_mut();
-    let ok = run(peer, |peer| {
-        let sdp = peer.publisher.create_offer()?;
-        offer = CString::new(sdp)
-            .map_err(|error| error.to_string())?
-            .into_raw();
-        Ok(())
-    });
-    if ok { offer } else { ptr::null_mut() }
+    make_string(peer, |peer| peer.publisher.create_offer())
 }
 
 #[unsafe(no_mangle)]

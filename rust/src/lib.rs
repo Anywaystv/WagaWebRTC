@@ -59,7 +59,6 @@ pub struct Publisher {
     disconnect_deadline: Option<Instant>,
     disconnect_reported: bool,
     ever_connected: bool,
-    audio_enabled: bool,
     audio_codec: Option<Codec>,
     video_enabled: bool,
 }
@@ -143,7 +142,6 @@ impl Publisher {
             disconnect_deadline: None,
             disconnect_reported: false,
             ever_connected: false,
-            audio_enabled: audio.is_some(),
             audio_codec: audio,
             video_enabled: h264 || h265,
         })
@@ -189,7 +187,7 @@ impl Publisher {
         }
         let stream_id = Some("waga".to_string());
         let mut change = self.rtc.sdp_api();
-        if self.audio_enabled {
+        if self.audio_codec.is_some() {
             self.audio_mid = Some(change.add_media(
                 MediaKind::Audio,
                 Direction::SendOnly,
