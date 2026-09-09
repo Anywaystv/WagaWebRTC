@@ -2237,7 +2237,8 @@ mod test {
     #[test]
     fn event_is_reasonably_sized() {
         let n = std::mem::size_of::<Event>();
-        assert!(n < 490); // Increased to accommodate abs-capture-time fields in ExtensionValues
+        // AAC format parameters grow MediaData/Event from 488 to 496 bytes on 64-bit targets.
+        assert!(n <= 496, "Event occupies {n} bytes; budget is 496 bytes");
     }
 }
 
