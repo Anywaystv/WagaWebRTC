@@ -373,6 +373,28 @@ final class DeliveryTests: XCTestCase {
         XCTAssertEqual(scheduler.select(), "wifi")
     }
 
+    func testLatencyPreferenceYieldsToOutstandingTraffic() {
+        for fast in ["wifi", "cell"] {
+            for scale in [0.1, 1.0, 10.0] {
+                let slow = fast == "wifi" ? "cell" : "wifi"
+                var quicker = WagaPathScore(id: fast, priority: 10 * scale,
+                                           smoothedRttMilliseconds: 20, pendingBytes: 0)
+                quicker.deliveryWindow = 32_000
+                quicker.deliveryLoad = 0.1
+                var slower = WagaPathScore(id: slow, priority: 9 * scale,
+                                          smoothedRttMilliseconds: 80, pendingBytes: 0)
+                slower.deliveryWindow = 32_000
+                slower.deliveryLoad = 0.2
+                var scheduler = WagaPathScheduler()
+                scheduler.replace([quicker, slower])
+                XCTAssertEqual(scheduler.select(), fast)
+                quicker.deliveryLoad = 0.9
+                scheduler.replace([quicker, slower])
+                XCTAssertEqual(scheduler.select(), slow)
+            }
+        }
+    }
+
     func testBusyReceiptWindowGrowsFasterThanIdleSamples() {
         var delivery = WagaDelivery()
         for index in 0 ..< 40 {

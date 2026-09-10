@@ -91,11 +91,11 @@ package struct WagaPathScheduler: Sendable {
             let load = max(path.deliveryLoad ?? 0, Double(path.pendingBytes) / window)
             var latencyCost = 0.0
             if path.deliveryLoad != nil, let rtt = path.smoothedRttMilliseconds, let fastestRtt {
-                // Favor quick delivery while there is room on the faster path.
-                // Bound the cost below one window so backlog can still shift traffic.
+                // Favor quick delivery while idle. Outstanding traffic already
+                // includes RTT, so latency is a floor rather than another charge.
                 latencyCost = max(0, 1 - fastestRtt / max(rtt, 1))
             }
-            return (load + Double(max(bytes, 1)) / window + latencyCost) / priority
+            return max(load + Double(max(bytes, 1)) / window, latencyCost) / priority
         }
         let rttMilliseconds = max(path.smoothedRttMilliseconds ?? 100, 1)
         let load = path.deliveryLoad ?? 0

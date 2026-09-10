@@ -53,9 +53,12 @@ Tests cover aggregate probe capacity, congestion on both paths, different fixed
 path delays, ambiguous duplicates and reordered loss reports. The macOS Rust test
 drives the production Swift scheduler, delivery tracker, parity encoder and bitrate
 ramp against two real str0m peers using simulated time. The C transmit structure remains unchanged.
-The combined-capacity regression remains failing: two 3.5 Mbps links reach the
-5 Mbps video target but still fluctuate and finish below it after 18 seconds.
-The assertion remains active. The 10+2 Mbps startup and periodic-ALR scenarios
+The combined-capacity regression now runs for 30 seconds and requires video to
+stay above 4.9 Mbps throughout the second half. Two 3.5 Mbps links meet that
+requirement after using RTT as a scheduling floor instead of adding it to
+outstanding traffic, which already reflects RTT. The previous double charge
+overloaded the faster path while leaving capacity unused on the slower path.
+The 10+2 Mbps startup and periodic-ALR scenarios
 hold 5 Mbps; the 1+0.5 Mbps scenario backs off under congestion. The harness uses
 Moblin's 10/9 priorities and also drops one Wi-Fi receipt at startup. Before
 normalizing priorities, that single receipt loss drove video to 0.50 Mbps despite

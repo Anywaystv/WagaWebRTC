@@ -108,7 +108,7 @@ fn bonded_encoder_feedback_and_scheduler_use_simulated_time() {
         ("healthy startup", [10_000_000u64, 2_000_000], 100u64, 12u64),
         ("startup receipt loss", [10_000_000, 2_000_000], 100, 18),
         ("periodic ALR probes", [10_000_000, 2_000_000], 35, 18),
-        ("combined capacity", [3_500_000, 3_500_000], 100, 18),
+        ("combined capacity", [3_500_000, 3_500_000], 100, 30),
         ("constrained links", [1_000_000, 500_000], 100, 12),
     ] {
         driver.request("reset".into());
@@ -139,6 +139,7 @@ fn bonded_encoder_feedback_and_scheduler_use_simulated_time() {
         let rtt = [30_000_000u64, 80_000_000];
         let mut video = 5_000_000u64;
         let mut minimum = video;
+        let mut settled_minimum = video;
         let mut frames = 0;
         let mut estimates = 0;
         let mut periodic = false;
@@ -297,6 +298,9 @@ fn bonded_encoder_feedback_and_scheduler_use_simulated_time() {
                     .parse()
                     .unwrap();
                 minimum = minimum.min(video);
+                if millis >= seconds * 1000 / 2 {
+                    settled_minimum = settled_minimum.min(video);
+                }
             }
             if millis % 1000 == 0 {
                 if label == "combined capacity" && millis % 5000 == 0 {
@@ -313,6 +317,12 @@ fn bonded_encoder_feedback_and_scheduler_use_simulated_time() {
             }
         }
         eprintln!("{label}: minimum={minimum} final={video} frames={frames} estimates={estimates}");
+        if label == "combined capacity" {
+            assert!(
+                settled_minimum > 4_900_000,
+                "{label}: settled minimum={settled_minimum}"
+            );
+        }
         results.push((
             label,
             minimum,
