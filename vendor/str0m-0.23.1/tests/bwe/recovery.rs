@@ -9,6 +9,77 @@ use str0m::bwe::Bitrate;
 use crate::common::{BweTestContext, Step, connect_with_bwe, init_crypto_default, init_log};
 
 #[test]
+fn application_limited_recovers_when_same_link_improves() -> Result<(), RtcError> {
+    init_crypto_default();
+    for seed in [1, 42, 99] {
+        let (mut l, mut r) = connect_with_bwe(Bitrate::kbps(500), Bitrate::mbps(6));
+        let mut ctx = BweTestContext::new(&mut l, &mut r);
+        ctx.set_media_send_rate(Bitrate::kbps(250));
+        for cycle in 0..2 {
+            let low = NetemConfig::new()
+                .latency(Duration::from_millis(30))
+                .link(Bitrate::kbps(500), DataSize::kbytes(20))
+                .seed(seed);
+            l.set_netem(low);
+            r.set_netem(low);
+            let estimate =
+                ctx.run_for_duration(&mut l, &mut r, Duration::from_secs(15 + cycle * 2))?;
+            assert!(
+                estimate.is_some_and(|rate| rate <= Bitrate::mbps(1)),
+                "must remain limited on the 500 kbps link: {estimate:?}"
+            );
+
+            let high = NetemConfig::new()
+                .latency(Duration::from_millis(10))
+                .jitter(Duration::from_millis(2))
+                .link(Bitrate::mbps(10), DataSize::kbytes(200))
+                .seed(seed);
+            l.set_netem(high);
+            r.set_netem(high);
+            // No handoff notification or media-rate increase to unstick the estimator.
+            let mut recovered = None;
+            let mut estimate = None;
+            for second in 1..=20 {
+                estimate = ctx.run_for_duration(&mut l, &mut r, Duration::from_secs(1))?;
+                if estimate.is_some_and(|rate| rate >= Bitrate::mbps(6)) && recovered.is_none() {
+                    recovered = Some(second);
+                }
+            }
+            println!("same-link recovery: seed={seed} cycle={cycle} seconds={recovered:?}");
+            assert!(recovered.is_some(), "no recovery: seed={seed} cycle={cycle}");
+            assert!(
+                estimate.is_some_and(|rate| rate >= Bitrate::mbps(6)),
+                "recovery did not hold: seed={seed} cycle={cycle} estimate={estimate:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn application_limited_does_not_invent_capacity_on_slow_link() -> Result<(), RtcError> {
+    init_crypto_default();
+    let (mut l, mut r) = connect_with_bwe(Bitrate::kbps(500), Bitrate::mbps(6));
+    let config = NetemConfig::new()
+        .latency(Duration::from_millis(30))
+        .link(Bitrate::kbps(500), DataSize::kbytes(20))
+        .seed(1);
+    l.set_netem(config);
+    r.set_netem(config);
+    let mut ctx = BweTestContext::new(&mut l, &mut r);
+    ctx.set_media_send_rate(Bitrate::kbps(250));
+    ctx.run_for_duration(&mut l, &mut r, Duration::from_secs(10))?;
+    for _ in 0..30 {
+        let estimate = ctx.run_for_duration(&mut l, &mut r, Duration::from_secs(1))?;
+        assert!(
+            estimate.is_some_and(|rate| rate <= Bitrate::mbps(1)),
+            "probing must not force the estimate up on an unchanged slow link: {estimate:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn aimd_multiplicative_decrease_on_congestion() -> Result<(), RtcError> {
     init_log();
     init_crypto_default();

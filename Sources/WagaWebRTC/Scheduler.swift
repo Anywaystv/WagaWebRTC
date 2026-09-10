@@ -31,11 +31,6 @@ struct WagaHandoff: Sendable {
         if changed { changedAt = now }
         return changed
     }
-
-    func probingPath(now: UInt64) -> String? {
-        guard let changedAt, now >= changedAt, now - changedAt < 5_000_000_000 else { return nil }
-        return primary
-    }
 }
 
 package struct WagaPathScore: Equatable, Sendable {
@@ -44,6 +39,7 @@ package struct WagaPathScore: Equatable, Sendable {
     var smoothedRttMilliseconds: Double?
     var pendingBytes: Int
     var deliveryLoad: Double?
+    var deliveryWindow: Int?
 
     package init(id: String, priority: Double, smoothedRttMilliseconds: Double?, pendingBytes: Int) {
         self.id = id
@@ -62,19 +58,50 @@ package struct WagaPathScheduler: Sendable {
         paths = active
     }
 
-    package func select() -> String? {
-        guard let index = paths.indices.min(by: { score(paths[$0]) < score(paths[$1]) }) else {
+    package func select(bytes: Int = 1200) -> String? {
+        let minimumPriority = paths.map { max($0.priority, 0.01) }.min() ?? 1
+        let fastestRtt = paths.filter {
+            $0.deliveryWindow != nil && $0.deliveryLoad != nil
+        }.compactMap(\.smoothedRttMilliseconds).map { max($0, 1) }.min()
+        guard let index = paths.indices.min(by: {
+            let lhs = score(paths[$0], bytes: bytes, fastestRtt: fastestRtt, minimumPriority: minimumPriority)
+            let rhs = score(paths[$1], bytes: bytes, fastestRtt: fastestRtt, minimumPriority: minimumPriority)
+            if lhs == rhs {
+                return (paths[$0].smoothedRttMilliseconds ?? 100)
+                    < (paths[$1].smoothedRttMilliseconds ?? 100)
+            }
+            return lhs < rhs
+        }) else {
             return nil
         }
         return paths[index].id
     }
 
-    private func score(_ path: WagaPathScore) -> Double {
+    private func score(_ path: WagaPathScore, bytes: Int, fastestRtt: Double?, minimumPriority: Double) -> Double {
+        // Priority is relative. Fading raw 10/9 values toward 1 can turn one
+        // missed receipt into a ninefold preference for the other path.
+        let relativePriority = max(path.priority, 0.01) / minimumPriority
+        if let window = path.deliveryWindow {
+            // SRTLA ranks window / (in-flight + next packet). Use bytes because
+            // RTP audio, video and padding packets have different sizes.
+            let window = Double(max(window, 1))
+            let stability = min(1, max(0, (window - 16_000) / 16_000))
+            let priority = 1 + (relativePriority - 1) * stability
+            // Socket-pending media is already in flight in the delivery tracker.
+            let load = max(path.deliveryLoad ?? 0, Double(path.pendingBytes) / window)
+            var latencyCost = 0.0
+            if path.deliveryLoad != nil, let rtt = path.smoothedRttMilliseconds, let fastestRtt {
+                // Favor quick delivery while there is room on the faster path.
+                // Bound the cost below one window so backlog can still shift traffic.
+                latencyCost = max(0, 1 - fastestRtt / max(rtt, 1))
+            }
+            return (load + Double(max(bytes, 1)) / window + latencyCost) / priority
+        }
         let rttMilliseconds = max(path.smoothedRttMilliseconds ?? 100, 1)
         let load = path.deliveryLoad ?? 0
         // Keep new and receipt-confirmed paths on the same scale. Local send
         // completion alone does not prove that an unconfirmed path delivered data.
         return (load + Double(path.pendingBytes) / 32_000 + rttMilliseconds / 10_000)
-            / max(path.priority, 0.01)
+            / relativePriority
     }
 }

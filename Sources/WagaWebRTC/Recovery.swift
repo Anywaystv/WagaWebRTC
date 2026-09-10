@@ -17,17 +17,30 @@ private struct RecoveryPacket {
 }
 
 struct WagaRecovery: Sendable {
-    private var history: [RecoveryPacketID: Data] = [:]
+    private struct SentPacket {
+        let data: Data
+        let transportSequence: UInt64?
+        var lastTransmission: UInt64
+    }
+
+    private var history: [RecoveryPacketID: SentPacket] = [:]
     private var historyOrder: [RecoveryPacketID] = []
     private var historyHead = 0
     private var groups: [UInt32: [RecoveryPacket]] = [:]
+    private var lastRepair: UInt64?
+    private var repairCredit = 1500
+    private(set) var repairBytes = 0
+    private(set) var repairRequests = 0
 
-    mutating func record(_ data: Data) -> Data? {
+    mutating func record(_ data: Data, transportSequence: UInt64? = nil,
+                         now: UInt64 = DispatchTime.now().uptimeNanoseconds) -> Data? {
         guard let id = rtpPacketID(data), history[id] == nil else {
             return nil
         }
 
-        history[id] = data
+        history[id] = SentPacket(data: data, transportSequence: transportSequence, lastTransmission: now)
+        // Repair traffic gets a bounded share of actual primary traffic.
+        repairCredit = min(1500, repairCredit + data.count / 16)
         historyOrder.append(id)
         trimHistory()
 
@@ -40,7 +53,8 @@ struct WagaRecovery: Sendable {
         return makeParity(packets)
     }
 
-    mutating func repairs(for data: Data) -> [Data]? {
+    mutating func repairs(for data: Data, now: UInt64 = DispatchTime.now().uptimeNanoseconds,
+                          minimumAge: UInt64 = 0) -> [Data]? {
         guard hasRecoveryMagic(data) else {
             return nil
         }
@@ -53,10 +67,25 @@ struct WagaRecovery: Sendable {
             return []
         }
 
+        repairRequests += 1
+        if let lastRepair, now < lastRepair || now - lastRepair < 20_000_000 { return [] }
         let ssrc = readUInt32(data, at: 8)
-        return (0 ..< count).compactMap { index in
-            history[.init(ssrc: ssrc, sequenceNumber: readUInt16(data, at: 12 + index * 2))]
+        for index in 0..<count {
+            let id = RecoveryPacketID(ssrc: ssrc, sequenceNumber: readUInt16(data, at: 12 + index * 2))
+            guard let packet = history[id], packet.data.count <= repairCredit,
+                  now >= packet.lastTransmission, now - packet.lastTransmission >= minimumAge else { continue }
+            history[id]?.lastTransmission = now
+            lastRepair = now
+            repairCredit -= packet.data.count
+            repairBytes += packet.data.count
+            return [packet.data]
         }
+        return []
+    }
+
+    func transportSequence(for data: Data) -> UInt64? {
+        guard let id = rtpPacketID(data) else { return nil }
+        return history[id]?.transportSequence
     }
 
     mutating func removeAll() {
@@ -64,11 +93,16 @@ struct WagaRecovery: Sendable {
         historyOrder.removeAll(keepingCapacity: true)
         historyHead = 0
         groups.removeAll(keepingCapacity: true)
+        lastRepair = nil
+        repairCredit = 1500
+        repairBytes = 0
+        repairRequests = 0
     }
 
     private mutating func trimHistory() {
         while history.count > packetHistorySize {
-            history.removeValue(forKey: historyOrder[historyHead])
+            let id = historyOrder[historyHead]
+            history.removeValue(forKey: id)
             historyHead += 1
         }
         if historyHead >= packetHistorySize {

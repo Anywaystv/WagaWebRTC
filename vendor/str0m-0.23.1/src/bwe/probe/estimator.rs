@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -38,6 +38,14 @@ const MAX_ACTIVE_PROBES: usize = 20;
 /// Probes older than this are considered stale and will be removed when hitting the cap.
 const STALE_PROBE_THRESHOLD: Duration = Duration::from_secs(5);
 
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeEstimate {
+    pub config: ProbeClusterConfig,
+    pub bitrate: Bitrate,
+    pub limited_by_sender: bool,
+    pub saturated_paths: usize,
+}
+
 /// Analyzes probe cluster results from TWCC feedback.
 ///
 /// This component takes packets tagged with a `TwccClusterId` and calculates the
@@ -57,6 +65,7 @@ pub struct ProbeEstimator {
 
 #[derive(Debug)]
 struct ProbeEstimatorState {
+    paths: HashMap<u64, PathProbe>,
     /// Configuration of the active probe (targets for validation).
     config: ProbeClusterConfig,
 
@@ -84,6 +93,47 @@ struct ProbeEstimatorState {
     total_bytes: DataSize,
     /// Number of packets included in this probe (received packets only).
     packet_count: usize,
+}
+
+#[derive(Debug)]
+struct PathProbe {
+    first_send: Instant,
+    last_send: Instant,
+    first_receive: Instant,
+    last_receive: Instant,
+    last_send_size: DataSize,
+    first_receive_size: DataSize,
+    bytes: DataSize,
+    packets: usize,
+}
+
+impl PathProbe {
+    fn add(&mut self, sent: Instant, received: Instant, size: DataSize) {
+        self.first_send = self.first_send.min(sent);
+        if sent >= self.last_send {
+            self.last_send = sent;
+            self.last_send_size = size;
+        }
+        if received <= self.first_receive {
+            self.first_receive = received;
+            self.first_receive_size = size;
+        }
+        self.last_receive = self.last_receive.max(received);
+        self.bytes += size;
+        self.packets += 1;
+    }
+
+    fn saturated(&self) -> bool {
+        let send_interval = self.last_send - self.first_send;
+        let receive_interval = self.last_receive - self.first_receive;
+        if self.packets < MIN_CLUSTER_SIZE || send_interval.is_zero() || receive_interval.is_zero()
+            || send_interval > MAX_PROBE_INTERVAL || receive_interval > MAX_PROBE_INTERVAL {
+            return false;
+        }
+        let sent = self.bytes.saturating_sub(self.last_send_size) / send_interval;
+        let received = self.bytes.saturating_sub(self.first_receive_size) / receive_interval;
+        received < sent * MIN_RATIO_FOR_UNSATURATED_LINK
+    }
 }
 
 impl ProbeEstimator {
@@ -141,7 +191,7 @@ impl ProbeEstimator {
     pub fn update<'t>(
         &mut self,
         records: impl Iterator<Item = &'t TwccSendRecord>,
-    ) -> impl Iterator<Item = (ProbeClusterConfig, Bitrate)> + '_ {
+    ) -> impl Iterator<Item = ProbeEstimate> + '_ {
         // Keep track of which clusters were updated in this call.
         self.did_update.clear();
 
@@ -234,6 +284,7 @@ impl ProbeEstimator {
 impl ProbeEstimatorState {
     pub fn new(config: ProbeClusterConfig, now: Instant) -> Self {
         Self {
+            paths: HashMap::new(),
             config,
             created_at: now,
             finalize_at: not_happening(),
@@ -256,6 +307,17 @@ impl ProbeEstimatorState {
 
         let packet_size = DataSize::from(record.size());
         let send_time = record.local_send_time();
+
+        if let Some(path) = record.egress_path {
+            if self.paths.len() < 256 || self.paths.contains_key(&path) {
+                self.paths.entry(path).or_insert_with(|| PathProbe {
+                    first_send: send_time, last_send: send_time,
+                    first_receive: recv_time, last_receive: recv_time,
+                    last_send_size: packet_size, first_receive_size: packet_size,
+                    bytes: DataSize::ZERO, packets: 0,
+                }).add(send_time, recv_time, packet_size);
+            }
+        }
 
         // Track min/max send time among included packets.
         let first = self.first_send_time.get_or_insert(send_time);
@@ -283,18 +345,18 @@ impl ProbeEstimatorState {
         true
     }
 
-    fn calculate_bitrate(&self) -> Option<(ProbeClusterConfig, Bitrate)> {
+    fn calculate_bitrate(&self) -> Option<ProbeEstimate> {
         let result = self.do_calculate_bitrate();
 
-        let ProbeResult::Estimate(bitrate) = result else {
+        let ProbeResult::Estimate(estimate) = result else {
             return None;
         };
 
         // Log the estimates continuously during the probe.
         trace!(%result, "Probe result");
-        log_probe_bitrate_estimate!(bitrate.as_f64());
+        log_probe_bitrate_estimate!(estimate.bitrate.as_f64());
 
-        Some((self.config, bitrate))
+        Some(estimate)
     }
 
     /// Calculate the estimated bitrate for this probe cluster.
@@ -392,7 +454,14 @@ impl ProbeEstimatorState {
             estimate = recv_rate * TARGET_UTILIZATION_FRACTION;
         }
 
-        ProbeResult::Estimate(estimate)
+        ProbeResult::Estimate(ProbeEstimate {
+            config: self.config,
+            bitrate: estimate,
+            // If arrivals keep up, the probe proves a lower bound on capacity.
+            // A slow sender cannot establish a lower network capacity ceiling.
+            limited_by_sender: recv_rate >= send_rate * MIN_RATIO_FOR_UNSATURATED_LINK,
+            saturated_paths: self.paths.values().filter(|path| path.saturated()).count(),
+        })
     }
 
     fn end_probe(&mut self, now: Instant) {
@@ -401,10 +470,10 @@ impl ProbeEstimatorState {
 }
 
 /// Result of a probe cluster estimation.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 enum ProbeResult {
     /// Successfully estimated bitrate
-    Estimate(Bitrate),
+    Estimate(ProbeEstimate),
     /// Not enough packets in cluster (< 4)
     ClusterTooSmall { recv: usize, limit: usize },
     /// Insufficient packets received (< 80% of sent)
@@ -428,7 +497,7 @@ enum ProbeResult {
 impl fmt::Display for ProbeResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProbeResult::Estimate(bitrate) => write!(f, "estimate={}", bitrate),
+            ProbeResult::Estimate(estimate) => write!(f, "estimate={}", estimate.bitrate),
             ProbeResult::ClusterTooSmall {
                 recv: received,
                 limit: required,
@@ -542,7 +611,7 @@ mod test {
         let results: Vec<_> = estimator.update(recv_vec.iter()).collect();
         let estimate_only_received = results
             .last()
-            .map(|(_, bitrate)| *bitrate)
+            .map(|estimate| estimate.bitrate)
             .expect("expected a probe estimate");
 
         // Second run: received + lost
@@ -553,7 +622,7 @@ mod test {
         let results: Vec<_> = estimator2.update(all_vec.iter()).collect();
         let estimate_with_lost = results
             .last()
-            .map(|(_, bitrate)| *bitrate)
+            .map(|estimate| estimate.bitrate)
             .expect("expected a probe estimate");
 
         assert_eq!(

@@ -25,6 +25,52 @@ round-trip latency. It checks startup probes, later ALR probes and a bandwidth
 estimate above the initial rate. BWE and ALR remain str0m's implementation;
 WagaWebRTC does not add a second congestion controller.
 
+A probe whose receive rate keeps up with its send rate proves only a lower bound
+on network capacity. Such a probe can raise the estimate, but cannot lower it
+when the sender emits the probe too slowly. Saturated probes can still reduce
+the estimate. Probe reductions also use GoogCC's throughput safeguard: they stay
+above the smaller of the current delay estimate and 85% of acknowledged throughput.
+This leaves room to drain congestion without accepting a probe far below recent
+delivery. Delay and loss control continue to react independently. Regression tests
+cover sender-limited startup probes, saturated probes and throughput backoff.
+
+The core exposes the most recent transmit's TWCC sequence as local metadata,
+cleared at each output poll. Bonding records the actual sending path against that
+sequence. Each path has its own delay trend; shared delay backoff requires congestion
+on all recently used paths. Probe estimates subtract each path's minimum transit
+delay before combining timing samples; increasing queue delay remains visible.
+A probe can lower the combined estimate only when its timing samples show every
+known route was saturated; partially loaded routes provide a lower bound.
+Acknowledged throughput retains the original feedback. Loss observations wait two
+feedback intervals plus the measured path delay difference (capped at one second)
+for a later report to replace a provisional missing status. Redundant sends
+have no identifiable winning path and are excluded only from timing samples.
+The Swift sender also marks an original TWCC sequence ambiguous before sending
+a ciphertext repair. A regression reproduces false probe backoff without this
+mark and preserves the estimate with it.
+Standard transport does not tag paths and retains its existing timing behavior.
+Tests cover aggregate probe capacity, congestion on both paths, different fixed
+path delays, ambiguous duplicates and reordered loss reports. The macOS Rust test
+drives the production Swift scheduler, delivery tracker, parity encoder and bitrate
+ramp against two real str0m peers using simulated time. The C transmit structure remains unchanged.
+The combined-capacity regression remains failing: two 3.5 Mbps links reach the
+5 Mbps video target but still fluctuate and finish below it after 18 seconds.
+The assertion remains active. The 10+2 Mbps startup and periodic-ALR scenarios
+hold 5 Mbps; the 1+0.5 Mbps scenario backs off under congestion. The harness uses
+Moblin's 10/9 priorities and also drops one Wi-Fi receipt at startup. Before
+normalizing priorities, that single receipt loss drove video to 0.50 Mbps despite
+10 Mbps of Wi-Fi capacity. With normalized priorities it holds 5 Mbps.
+
+A publisher starting at its full allocation validates that rate with one initial
+probe instead of sending 3× and 6× bursts. Below-target startup and later recovery
+retain exponential probing.
+
+Clean startup feedback still enters the loss controller's observations before
+the startup estimate override. Previously those reports were skipped while their
+elapsed time remained in the observation, amplifying isolated missing packets.
+A regression with two short loss bursts separated by clean 4.8 Mbps traffic
+reproduced a 667 kbps estimate and now stays above 4 Mbps.
+
 ## Session recovery
 
 Overlapping TWCC reports count each missing packet only once. Repeated missing
@@ -48,6 +94,12 @@ The BWE probe controller receives congestion-state changes even when the numeric
 bandwidth estimate stays unchanged. This lets recovery probes resume after loss
 clears, while still suppressing probes when congestion starts at the same rate.
 Regression tests cover both transitions at 250 kbps.
+
+During ALR, an unchanged estimate below the delay-based limit can resume recovery
+after HOLD expires and a full loss-free observation window arrives. This avoids
+waiting for a previous probe's capacity cap to expire before probing again.
+The estimate and capacity cap stay intact; probes must demonstrate any increase.
+Tests cover same-link capacity recovery, active loss, HOLD and an unchanged slow link.
 
 Outside ALR, unmet demand triggers a recovery probe after 15 seconds without a
 probe, even when low estimates fluctuate. Active congestion still blocks it.

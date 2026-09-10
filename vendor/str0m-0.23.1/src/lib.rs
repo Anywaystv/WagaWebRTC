@@ -1546,6 +1546,7 @@ impl Rtc {
     ///
     /// See [`Rtc`] instance documentation for how this is expected to be used in a loop.
     pub fn poll_output(&mut self) -> Result<Output, RtcError> {
+        self.session.last_transmit_sequence = None;
         let o = self.do_poll_output()?;
 
         match &o {
@@ -2128,6 +2129,17 @@ impl Rtc {
     /// Only relevant if BWE was enabled in the [`RtcConfig::enable_bwe()`]
     pub fn bwe(&mut self) -> Bwe {
         Bwe(self)
+    }
+
+    /// TWCC sequence for the most recent output, cleared on every poll.
+    pub fn last_transmit_sequence(&self) -> Option<u64> {
+        self.session.last_transmit_sequence
+    }
+
+    /// Associate a sent packet with its actual transport path. `None` marks a
+    /// redundant send whose winning path cannot be identified from TWCC alone.
+    pub fn set_egress_path(&mut self, sequence: u64, path: Option<u64>) {
+        self.session.set_egress_path(sequence, path);
     }
 
     fn is_correct_change_id(&self, change_id: usize) -> bool {

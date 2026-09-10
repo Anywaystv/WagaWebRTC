@@ -3,10 +3,52 @@
 use std::time::Duration;
 
 use netem::{DataSize, NetemConfig};
-use str0m::RtcError;
-use str0m::bwe::Bitrate;
+use str0m::bwe::{Bitrate, BweKind};
+use str0m::{Event, RtcError};
 
 use crate::common::{BweTestContext, Step, connect_with_bwe, init_crypto_default, init_log};
+
+#[test]
+fn steady_wifi_capacity_with_video_rate_variation() -> Result<(), RtcError> {
+    init_crypto_default();
+    let target = Bitrate::bps(6_070_588);
+    for (capacity, jitter) in [(7, 0), (7, 2), (10, 2), (20, 0), (20, 2)] {
+        let (mut l, mut r) = connect_with_bwe(target, target);
+        let network = NetemConfig::new()
+            .latency(Duration::from_millis(10))
+            .jitter(Duration::from_millis(jitter))
+            .link(Bitrate::mbps(capacity), DataSize::kbytes(200))
+            .seed(42);
+        l.set_netem(network);
+        r.set_netem(network);
+        let mut ctx = BweTestContext::new(&mut l, &mut r);
+        ctx.set_media_send_rate(Bitrate::bps(5_160_000));
+        ctx.run_for_duration(&mut l, &mut r, Duration::from_secs(5))?;
+        let offset = l.events.len();
+        for tick in 0..100 {
+            ctx.set_media_send_rate(Bitrate::bps(if tick % 10 == 0 {
+                7_000_000
+            } else {
+                4_960_000
+            }));
+            ctx.run_for_duration(&mut l, &mut r, Duration::from_millis(100))?;
+        }
+        let estimates: Vec<_> = l.events[offset..]
+            .iter()
+            .filter_map(|(_, event)| match event {
+                Event::EgressBitrateEstimate(BweKind::Twcc(rate)) => Some(*rate),
+                _ => None,
+            })
+            .collect();
+        assert!(!estimates.is_empty());
+        assert!(
+            estimates.iter().all(|rate| *rate >= target),
+            "healthy link fell below the 5 Mbps video budget: capacity={capacity} jitter={jitter} min={:?}",
+            estimates.iter().map(|rate| rate.as_u64()).min()
+        );
+    }
+    Ok(())
+}
 
 #[test]
 fn estimate_capped_by_max_bitrate() -> Result<(), RtcError> {

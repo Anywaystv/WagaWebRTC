@@ -33,6 +33,14 @@ struct WagaDelivery: Sendable {
         packets = packets.filter { $0.value.path != id }
     }
 
+    mutating func revalidatePath(_ id: String, now: UInt64) {
+        expire(now: now)
+        // Reachability does not clear packets still in flight or establish a
+        // new capacity allowance. Require fresh receipts for handoff detection.
+        paths[id]?.receivedPackets = 0
+        paths[id]?.lastReceived = 0
+    }
+
     mutating func expire(now: UInt64) {
         while head < order.count {
             let (token, sent) = order[head]
@@ -54,29 +62,9 @@ struct WagaDelivery: Sendable {
         }
     }
 
-    func allows(_ id: String, bytes: Int) -> Bool {
-        guard let path = paths[id], path.confirmed else { return true }
-        return packets.count < 4096 && order.count - head < 4096
-            && path.outstanding + bytes <= path.window
-    }
-
-    func preferredPaths(_ active: [WagaPathScore], bytes: Int) -> [WagaPathScore] {
-        let available = active.filter { allows($0.id, bytes: bytes) }
-        // str0m has already paced this packet. A full delivery window may
-        // change its route, but must not discard media or a requested repair.
-        return available.isEmpty ? active : available
-    }
-
-    func routes(_ scheduler: WagaPathScheduler, bytes: Int, now: UInt64, probing: String? = nil) -> [String] {
-        // Keep probes on one path only while its delivery window remains usable.
-        if let probing, scheduler.paths.contains(where: { $0.id == probing }),
-           let state = paths[probing], state.confirmed, now >= state.lastReceived,
-           now - state.lastReceived < Self.lifetime, allows(probing, bytes: bytes) {
-            return [probing]
-        }
-        var scheduler = scheduler
-        scheduler.replace(preferredPaths(scheduler.paths, bytes: bytes))
-        guard let primary = scheduler.select() else { return [] }
+    func routes(_ scheduler: WagaPathScheduler, bytes: Int, now: UInt64) -> [String] {
+        // Windows rank paths; they must not block packets already paced by str0m.
+        guard let primary = scheduler.select(bytes: bytes) else { return [] }
         guard paths.values.contains(where: { $0.confirmed }),
               let sample = scheduler.paths.filter({
                   $0.id != primary && now >= (paths[$0.id]?.lastSent ?? 0)
@@ -126,7 +114,10 @@ struct WagaDelivery: Sendable {
             state.receivedPackets = min(state.receivedPackets + 1, 3)
             state.lastReceived = now
             state.outstanding -= packet.bytes
-            state.window = min(512_000, state.window + max(1, 1_200 * packet.bytes / state.window))
+            // As in SRTLA, successful delivery grows a busy path faster than
+            // an idle one. A trickle of idle samples must not inflate its weight.
+            let increment = state.outstanding > state.window ? 30 : 1
+            state.window = min(512_000, state.window + max(1, packet.bytes * increment / 1000))
             paths[path] = state
         }
         return true

@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use super::super::macros::{log_bitrate_estimate, log_delay_variation};
@@ -6,7 +6,7 @@ use super::super::{AckedPacket, BandwidthUsage};
 use super::arrival_group::ArrivalGroupAccumulator;
 use super::rate_control::RateControl;
 use super::trendline::TrendlineEstimator;
-use crate::rtp_::Bitrate;
+use crate::rtp_::{Bitrate, TwccSeq};
 use crate::util::{MovingAverage, already_happened};
 
 const MAX_RTT_HISTORY_WINDOW: usize = 32;
@@ -21,7 +21,14 @@ const RTT_SMOOTHING_FACTOR: f64 = 0.125;
 /// This controller attempts to estimate the available send bandwidth by looking at the variations
 /// in packet arrival times for groups of packets sent together. Broadly, if the delay variation is
 /// increasing this indicates overuse.
+struct PathDetector {
+    groups: ArrivalGroupAccumulator,
+    trend: TrendlineEstimator,
+    updated: Instant,
+}
+
 pub struct DelayController {
+    paths: HashMap<u64, PathDetector>,
     arrival_group_accumulator: ArrivalGroupAccumulator,
     trendline_estimator: TrendlineEstimator,
     rate_control: RateControl,
@@ -42,6 +49,7 @@ pub struct DelayController {
 impl DelayController {
     pub fn new(initial_bitrate: Bitrate) -> Self {
         Self {
+            paths: HashMap::new(),
             arrival_group_accumulator: ArrivalGroupAccumulator::default(),
             trendline_estimator: TrendlineEstimator::new(20),
             rate_control: RateControl::new(initial_bitrate, Bitrate::kbps(40), Bitrate::gbps(10)),
@@ -57,6 +65,7 @@ impl DelayController {
     pub fn update(
         &mut self,
         acked: &[AckedPacket],
+        path_for_sequence: Option<&HashMap<TwccSeq, u64>>,
         acked_bitrate: Option<Bitrate>,
         probe_bitrate: Option<Bitrate>,
         now: Instant,
@@ -69,25 +78,23 @@ impl DelayController {
 
         for acked_packet in acked {
             max_rtt = max_rtt.max(Some(acked_packet.rtt()));
-            if let Some(delay_variation) = self
-                .arrival_group_accumulator
-                .accumulate_packet(acked_packet)
-            {
-                log_delay_variation!(delay_variation.arrival_delta);
-
-                // Got a new delay variation, add it to the trendline.
-                //
-                // IMPORTANT: Match WebRTC's TrendlineEstimator time base.
-                // WebRTC calls Detect/UpdateThreshold with `arrival_time_ms` (remote receive time),
-                // not the local "time we processed this feedback". Using the remote receive time
-                // avoids threshold adaptation artifacts when many deltas are processed in one
-                // feedback batch (e.g. TWCC reports).
-                //
-                // Note: We use remote timestamps for relative timing only (computing time deltas
-                // between packets). Clock skew doesn't matter since we're measuring trends in
-                // delay variations, not absolute times.
-                self.trendline_estimator
-                    .add_delay_observation(delay_variation, delay_variation.last_remote_recv_time);
+            let (groups, trend) = if let Some(path_for_sequence) = path_for_sequence {
+                let Some(path) = path_for_sequence.get(&acked_packet.seq_no) else { continue; };
+                if self.paths.len() >= 256 && !self.paths.contains_key(path) { continue; }
+                let detector = self.paths.entry(*path).or_insert_with(|| PathDetector {
+                    groups: ArrivalGroupAccumulator::default(),
+                    trend: TrendlineEstimator::new(20),
+                    updated: now,
+                });
+                detector.updated = now;
+                (&mut detector.groups, &mut detector.trend)
+            } else {
+                (&mut self.arrival_group_accumulator, &mut self.trendline_estimator)
+            };
+            if let Some(variation) = groups.accumulate_packet(acked_packet) {
+                log_delay_variation!(variation.arrival_delta);
+                // Each detector uses receiver time, independent of feedback batching.
+                trend.add_delay_observation(variation, variation.last_remote_recv_time);
             }
         }
 
@@ -95,7 +102,7 @@ impl DelayController {
             self.update_rtt(rtt);
         }
 
-        let new_hypothesis = self.trendline_estimator.hypothesis();
+        let new_hypothesis = self.hypothesis(now);
 
         self.update_estimate(
             new_hypothesis,
@@ -130,7 +137,7 @@ impl DelayController {
         }
 
         self.update_estimate(
-            self.trendline_estimator.hypothesis(),
+            self.hypothesis(now),
             acked_bitrate,
             None,
             self.get_smoothed_rtt(),
@@ -153,7 +160,18 @@ impl DelayController {
     /// This is useful for gating behaviors (like probing) that would otherwise
     /// re-excite the system while we're already congested.
     pub fn is_overusing(&self) -> bool {
-        self.trendline_estimator.hypothesis() == BandwidthUsage::Overuse
+        self.hypothesis(self.last_twcc_report) == BandwidthUsage::Overuse
+    }
+
+    fn hypothesis(&self, now: Instant) -> BandwidthUsage {
+        if self.paths.is_empty() { return self.trendline_estimator.hypothesis(); }
+        let mut active = self.paths.values().filter(|path| now.saturating_duration_since(path.updated) <= MAX_TWCC_GAP).peekable();
+        if active.peek().is_none() { return BandwidthUsage::Normal; }
+        // Queueing on one route should first shift traffic to a route with room.
+        // Shared rate backs off when all recently used routes are congested.
+        if active.all(|path| path.trend.hypothesis() == BandwidthUsage::Overuse) {
+            BandwidthUsage::Overuse
+        } else { BandwidthUsage::Normal }
     }
 
     /// Update smoothed RTT using EWMA (RFC 6298, alpha = 1/8).
@@ -244,7 +262,7 @@ mod test {
         let mut controller = DelayController::new(Bitrate::mbps(5));
         controller.last_twcc_report = now;
         let later = now + Duration::from_secs(16);
-        assert_eq!(controller.update(&[], Some(Bitrate::kbps(250)), None, later),
+        assert_eq!(controller.update(&[], None, Some(Bitrate::kbps(250)), None, later),
                    Some(Bitrate::mbps(5)));
         assert_eq!(controller.last_twcc_report, now);
         assert!(!controller.trendline_hypothesis_valid(later));

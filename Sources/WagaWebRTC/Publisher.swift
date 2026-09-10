@@ -64,7 +64,7 @@ public final class WagaPublisher: @unchecked Sendable {
         network.onReceive = { [weak self] source, destination, data in
             self?.receive(source: source, destination: destination, data: data)
         }
-        network.onPathValidated = { [weak self] in
+        network.onPathCapacityChanged = { [weak self] in
             guard let self, !stopped else { return }
             do {
                 try core.requestPathProbe()
@@ -73,14 +73,8 @@ public final class WagaPublisher: @unchecked Sendable {
                 delegate?.wagaPublisherFailed(String(describing: error))
             }
         }
-        network.onHandoff = { [weak self] in
-            guard let self, !stopped else { return }
-            do {
-                try core.restartOnPathChange()
-                drain()
-            } catch {
-                delegate?.wagaPublisherFailed(String(describing: error))
-            }
+        network.onTransmitPath = { [weak self] sequence, path in
+            self?.core.setEgressPath(sequence: sequence, path: path)
         }
         network.onServerReflexiveCandidate = { [weak self] address, base in
             self?.serverReflexiveCandidate(address, base: base)
@@ -225,7 +219,8 @@ public final class WagaPublisher: @unchecked Sendable {
             let now = DispatchTime.now().uptimeNanoseconds
             if now - lastDiagnostic >= 1_000_000_000 {
                 lastDiagnostic = now
-                if let snapshot = core.bweDiagnosticSnapshot() {
+                if var snapshot = core.bweDiagnosticSnapshot() {
+                    if let paths = network.diagnosticSnapshot() { snapshot += " \(paths)" }
                     delegate?.wagaPublisherDiagnostic(snapshot)
                 }
             }
