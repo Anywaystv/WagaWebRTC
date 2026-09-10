@@ -108,6 +108,7 @@ fn bonded_encoder_feedback_and_scheduler_use_simulated_time() {
         ("healthy startup", [10_000_000u64, 2_000_000], 100u64, 12u64),
         ("startup receipt loss", [10_000_000, 2_000_000], 100, 18),
         ("periodic ALR probes", [10_000_000, 2_000_000], 35, 18),
+        ("quiet media resume", [10_000_000, 2_000_000], 100, 25),
         ("combined capacity", [3_500_000, 3_500_000], 100, 30),
         ("constrained links", [1_000_000, 500_000], 100, 12),
     ] {
@@ -176,7 +177,13 @@ fn bonded_encoder_feedback_and_scheduler_use_simulated_time() {
                     .find(|p| p.spec().codec == str0m::format::Codec::H264)
                     .unwrap()
                     .pt();
-                let mut frame = vec![0x55; (video * utilization / 100 / 8 / 30) as usize + 5];
+                let frame_utilization =
+                    if label == "quiet media resume" && (5000..13000).contains(&millis) {
+                        3
+                    } else {
+                        utilization
+                    };
+                let mut frame = vec![0x55; (video * frame_utilization / 100 / 8 / 30) as usize + 5];
                 frame[..5].copy_from_slice(&[0, 0, 0, 1, 0x65]);
                 writer
                     .write(

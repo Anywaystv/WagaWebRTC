@@ -120,6 +120,14 @@ impl DelayController {
         self.next_timeout
     }
 
+    pub fn set_application_limited(&mut self, application_limited: bool) {
+        self.rate_control.set_application_limited(application_limited);
+    }
+
+    pub fn is_application_limited_with_low_delay(&self) -> bool {
+        self.rate_control.is_application_limited_with_low_delay()
+    }
+
     pub fn handle_timeout(&mut self, acked_bitrate: Option<Bitrate>, now: Instant) {
         if !self.trendline_hypothesis_valid(now) {
             // We haven't received a TWCC report in a while. The trendline hypothesis can

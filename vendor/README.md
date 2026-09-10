@@ -34,6 +34,18 @@ This leaves room to drain congestion without accepting a probe far below recent
 delivery. Delay and loss control continue to react independently. Regression tests
 cover sender-limited startup probes, saturated probes and throughput backoff.
 
+During ALR, when smoothed RTT is within 100 ms of its observed minimum, a lower probe
+result also requires delay overuse before reducing the estimate. Jitter can stretch
+a short probe even when the network has spare capacity. Under those conditions,
+delay backoff limits each reduction to 15% of the current estimate using the existing
+RTT-based interval, instead of treating low media throughput as a capacity ceiling.
+Sustained overuse still reduces the rate. Greater RTT growth, missing RTT evidence,
+or leaving ALR restores throughput-based backoff. Loss control remains active.
+The cellular ramp-up test covers three loss seeds without changing its 1.5 Mbps
+requirement or time limits. Unit tests cover transient delay, RTT spacing, queue
+growth, missing RTT, sustained overuse and exit from ALR. The local verification
+script also runs the vendored bandwidth-estimation suite so CI covers this failure.
+
 The core exposes the most recent transmit's TWCC sequence as local metadata,
 cleared at each output poll. Bonding records the actual sending path against that
 sequence. Each path has its own delay trend; shared delay backoff requires congestion

@@ -218,6 +218,8 @@ impl SendSideBandwidthEstimator {
     /// This is typically called from the session's packet sending logic.
     pub fn on_media_sent(&mut self, bytes: DataSize, now: Instant) {
         self.alr_detector.on_bytes_sent(bytes, now);
+        self.delay_controller
+            .set_application_limited(self.alr_detector.alr_start_time().is_some());
     }
 
     /// Record a packet from a TWCC report.
@@ -239,8 +241,14 @@ impl SendSideBandwidthEstimator {
         for result in self.probe_estimator.update(timing_records.iter().copied()) {
             let mut bitrate = result.bitrate;
             // A probe limited by only one route cannot cap combined capacity.
+            // In ALR, jitter can stretch a short probe below the previous estimate.
+            // Require delay overuse or RTT growth before accepting a lower ceiling.
             // Delay and settled loss feedback still enforce actual congestion.
-            if result.limited_by_sender || result.saturated_paths < self.path_delay.path_count() {
+            if result.limited_by_sender
+                || result.saturated_paths < self.path_delay.path_count()
+                || (self.delay_controller.is_application_limited_with_low_delay()
+                    && !self.delay_controller.is_overusing())
+            {
                 if let Some(current) = self.delay_controller.last_estimate() {
                     bitrate = bitrate.max(current);
                 }

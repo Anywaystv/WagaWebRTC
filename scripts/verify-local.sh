@@ -9,6 +9,7 @@ fi
 cd "$project_dir"
 cargo fmt --all -- --check
 cargo test --locked
+cargo test --manifest-path vendor/str0m-0.23.1/Cargo.toml --locked --features _internal_test_exports --lib --test bwe
 cargo clippy --locked --all-targets -- -D warnings
 ./scripts/build-xcframework.sh
 xcodebuild -scheme WagaWebRTC \

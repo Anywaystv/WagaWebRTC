@@ -21,6 +21,8 @@ const MULTIPLICATIVE_INCREASE_COEF: f64 = 1.08;
 const MAX_ESTIMATE_RATIO: f64 = 1.5;
 /// Default backoff time added to RTT for response time calculation (kDefaultBackoffTimeInMs in WebRTC).
 const DEFAULT_BACKOFF_TIME: Duration = Duration::from_millis(100);
+// Above this RTT growth, queueing overrides the low-traffic backoff safeguard.
+const MAX_ALR_RTT_INCREASE: Duration = Duration::from_millis(100);
 /// Number of standard deviations below mean to reset observed bitrate average.
 const OBSERVED_BITRATE_RESET_THRESHOLD_STD: f64 = 3.0;
 
@@ -32,6 +34,7 @@ const OBSERVED_BITRATE_RESET_THRESHOLD_STD: f64 = 3.0;
 /// * Congestion estimates from the delay controller.
 pub struct RateControl {
     state: State,
+    application_limited: bool,
 
     estimated_bitrate: Bitrate,
     min_bitrate: Bitrate,
@@ -45,6 +48,7 @@ pub struct RateControl {
     last_estimate_update: Option<Instant>,
     // Last RTT estimate in micro-seconds
     last_rtt: Option<Duration>,
+    min_rtt: Option<Duration>,
 }
 
 impl RateControl {
@@ -53,6 +57,7 @@ impl RateControl {
 
         Self {
             state: State::Increase,
+            application_limited: false,
 
             estimated_bitrate: start_bitrate,
             min_bitrate,
@@ -62,6 +67,7 @@ impl RateControl {
             averaged_observed_bitrate: MovingAverage::new(OBSERVED_BIT_RATE_SMOOTHING_FACTOR),
             last_estimate_update: None,
             last_rtt: None,
+            min_rtt: None,
         }
     }
 
@@ -76,6 +82,7 @@ impl RateControl {
         self.last_observed_bitrate = Some(observed_bitrate);
         if let Some(rtt) = rtt {
             self.last_rtt = Some(rtt);
+            self.min_rtt = Some(self.min_rtt.map_or(rtt, |minimum| minimum.min(rtt)));
         }
 
         self.state = self.state.transition(signal);
@@ -100,14 +107,33 @@ impl RateControl {
 
                 // Only apply decrease if enough time has passed since last bitrate change
                 // or if throughput is critically low (< 50% of estimate)
-                if self.time_to_reduce_further(now, observed_bitrate) {
-                    self.decrease(observed_bitrate, now);
+                let backoff_rate = if self.is_application_limited_with_low_delay() {
+                    // Low media throughput is not a capacity measurement in ALR.
+                    // Use the existing RTT-based interval while overuse persists.
+                    observed_bitrate.max(self.estimated_bitrate)
+                } else {
+                    observed_bitrate
+                };
+                if self.time_to_reduce_further(now, backoff_rate) {
+                    self.decrease(backoff_rate, now);
                 }
             }
             State::Hold => {
                 // Do nothing
             }
         }
+    }
+
+    pub fn set_application_limited(&mut self, application_limited: bool) {
+        self.application_limited = application_limited;
+    }
+
+    pub fn is_application_limited_with_low_delay(&self) -> bool {
+        self.application_limited
+            && self
+                .last_rtt
+                .zip(self.min_rtt)
+                .is_some_and(|(rtt, minimum)| rtt <= minimum + MAX_ALR_RTT_INCREASE)
     }
 
     fn update_observed_bitrate(&mut self, observed_bitrate: Bitrate) {
@@ -419,6 +445,65 @@ mod test {
         fn packet_size_uses_bits_per_1200_byte_packet() {
             let control = make_control(288_000);
             assert_eq!(control.estimated_packet_size(), 9_600.0);
+        }
+
+        #[test]
+        fn application_limited_backoff_waits_for_rtt_and_stops_when_delay_clears() {
+            let now = Instant::now();
+            let mut control = make_control(5_000_000);
+            control.set_application_limited(true);
+            control.update(Signal::Normal, 250_000.into(), Some(duration_ms(100)), now);
+            control.update(Signal::Overuse, 250_000.into(), None, now + duration_ms(100));
+            assert_eq!(control.estimated_bitrate().as_u64(), 4_250_000);
+            control.update(Signal::Overuse, 250_000.into(), None, now + duration_ms(125));
+            assert_eq!(control.estimated_bitrate().as_u64(), 4_250_000);
+            control.update(Signal::Normal, 250_000.into(), None, now + duration_ms(200));
+            assert_eq!(control.estimated_bitrate().as_u64(), 4_250_000);
+
+            control.set_application_limited(false);
+            control.update(Signal::Overuse, 250_000.into(), None, now + duration_ms(225));
+            assert_eq!(control.estimated_bitrate().as_u64(), 212_500);
+        }
+
+        #[test]
+        fn queue_growth_restores_throughput_backoff_in_alr() {
+            let now = Instant::now();
+            let mut control = make_control(5_000_000);
+            control.set_application_limited(true);
+            control.update(Signal::Normal, 250_000.into(), Some(duration_ms(200)), now);
+            control.update(
+                Signal::Overuse, 250_000.into(), Some(duration_ms(230)),
+                now + duration_ms(200),
+            );
+            assert_eq!(control.estimated_bitrate().as_u64(), 4_250_000);
+
+            // A growing queue must bypass the interval even with little media.
+            control.update(
+                Signal::Overuse, 250_000.into(), Some(duration_ms(350)),
+                now + duration_ms(225),
+            );
+            assert_eq!(control.estimated_bitrate().as_u64(), 212_500);
+        }
+
+        #[test]
+        fn application_limited_backoff_requires_rtt_evidence() {
+            let now = Instant::now();
+            let mut control = make_control(5_000_000);
+            control.set_application_limited(true);
+            control.update(Signal::Overuse, 250_000.into(), None, now);
+            assert_eq!(control.estimated_bitrate().as_u64(), 212_500);
+        }
+
+        #[test]
+        fn sustained_overuse_still_reduces_an_application_limited_sender() {
+            let now = Instant::now();
+            let mut control = make_control(5_000_000);
+            control.set_application_limited(true);
+            control.update(Signal::Normal, 250_000.into(), Some(duration_ms(100)), now);
+            for tick in 1..=20 {
+                control.update(Signal::Overuse, 250_000.into(), None, now + duration_ms(tick * 100));
+            }
+            assert!(control.estimated_bitrate().as_u64() < 500_000);
         }
 
         #[test]
