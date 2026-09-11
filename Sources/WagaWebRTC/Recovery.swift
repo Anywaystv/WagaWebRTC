@@ -30,7 +30,6 @@ struct WagaRecovery: Sendable {
     private var lastRepair: UInt64?
     private var repairCredit = 1500
     private(set) var repairBytes = 0
-    private(set) var repairRequests = 0
 
     mutating func record(_ data: Data, transportSequence: UInt64? = nil,
                          now: UInt64 = DispatchTime.now().uptimeNanoseconds) -> Data? {
@@ -67,7 +66,6 @@ struct WagaRecovery: Sendable {
             return []
         }
 
-        repairRequests += 1
         if let lastRepair, now < lastRepair || now - lastRepair < 20_000_000 { return [] }
         let ssrc = readUInt32(data, at: 8)
         for index in 0..<count {
@@ -96,7 +94,6 @@ struct WagaRecovery: Sendable {
         lastRepair = nil
         repairCredit = 1500
         repairBytes = 0
-        repairRequests = 0
     }
 
     private mutating func trimHistory() {

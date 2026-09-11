@@ -58,9 +58,10 @@ Packets duplicated across routes have an ambiguous winning path and contribute
 to throughput and loss, but not path timing. This metadata is local to the sender
 and does not change the RTP wire format or require an ingest upgrade.
 
-Debug snapshots include each active interface's cumulative primary RTP bytes, RTT,
-outstanding bytes, socket-pending bytes, window and receipt support, plus repair request and byte counters. Primary RTP counts exclude the
-extra idle-path copies and parity; they include padding and retransmitted RTP.
+Optional publisher diagnostics report interface readiness, availability changes,
+removal, and transport disconnects. They do not emit periodic bandwidth or packet
+counter dumps. The native estimator snapshot remains available on demand for
+debugging and regression tests.
 
 A shared 4096-packet history allows repairs over another healthy path. One XOR parity datagram per eight encrypted RTP packets can recover one missing packet without a round trip, at about 12.5% overhead. History repairs wait at least the measured path RTT (100 ms to one second), use at most one packet every 20 ms, and receive 1/16 of primary traffic as byte credit, capped at 1500 bytes. Retransmitted ciphertext marks its original TWCC route ambiguous so delayed repairs cannot masquerade as probe congestion. Native WebRTC NACK/RTX remains available; WagaStrim deduplicates retransmissions.
 

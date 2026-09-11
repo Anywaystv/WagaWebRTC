@@ -10,6 +10,7 @@ final class WagaNetwork: @unchecked Sendable {
     var onServerReflexiveCandidate: ((String, String) -> Void)?
     var onReceive: ((String, String, Data) -> Void)?
     var onError: ((String) -> Void)?
+    var onDiagnostic: ((String) -> Void)?
     var onPathCapacityChanged: (() -> Void)?
     var onTransmitPath: ((UInt64, UInt64?) -> Void)?
 
@@ -105,6 +106,7 @@ final class WagaNetwork: @unchecked Sendable {
                     guard let self, let path, self.paths.values.contains(where: { $0 === path }) else { return }
                     self.paths.removeValue(forKey: id)
                     self.paths[candidate] = path
+                    self.onDiagnostic?("interface \(path.interface.name) ready")
                     self.onCandidate?(candidate)
                 }
                 path.onReceive = { [weak self] source, destination, data in
@@ -122,6 +124,7 @@ final class WagaNetwork: @unchecked Sendable {
                     guard let self, let path, let port = path.port,
                           self.paths.values.contains(where: { $0 === path }) else { return }
                     let candidate = makeSocketAddress(path.address, port.rawValue)
+                    self.onDiagnostic?("interface \(path.interface.name) \(available ? "available" : "unavailable")")
                     if available {
                         self.onCandidate?(candidate)
                     } else {
@@ -144,6 +147,7 @@ final class WagaNetwork: @unchecked Sendable {
             if let path = paths.removeValue(forKey: id) {
                 let candidate = path.port.map { makeSocketAddress(path.address, $0.rawValue) }
                 path.stop()
+                onDiagnostic?("interface \(path.interface.name) removed")
                 if let candidate { onCandidateRemoved?(candidate) }
             }
         }
@@ -198,24 +202,8 @@ final class WagaNetwork: @unchecked Sendable {
         }
         for id in selected {
             guard let path = paths[id], let remote = routes[id] else { continue }
-            if media, id == selected.first { path.primaryRtpBytes += UInt64(data.count) }
             path.send(data, to: remote)
         }
-    }
-
-    func diagnosticSnapshot() -> String? {
-        guard bonding else { return nil }
-        let summaries = scheduler.paths.compactMap { score -> String? in
-            guard let path = paths[score.id] else { return nil }
-            let state = delivery.paths[score.id]
-            return "\(path.interface.name){rtp_bytes=\(path.primaryRtpBytes)"
-                + " pending_bytes=\(path.pendingBytes)"
-                + " rtt_ms=\(Int(score.smoothedRttMilliseconds ?? 0))"
-                + " outstanding=\(state?.outstanding ?? 0) window=\(state?.window ?? 32_000)"
-                + " receipts=\(state?.confirmed ?? false)}"
-        }.sorted()
-        return "bonding_paths=[\(summaries.joined(separator: ", "))]"
-            + " repair_requests=\(recovery.repairRequests) repair_bytes=\(recovery.repairBytes)"
     }
 
     private func refreshScheduler(destination: String) -> [String: String] {
@@ -284,7 +272,6 @@ private final class WagaPath: @unchecked Sendable {
     private let bonding: Bool
     private(set) var smoothedRttMilliseconds: Double?
     private(set) var pendingBytes = 0
-    var primaryRtpBytes: UInt64 = 0
     var egressId: UInt64 = 0
     private let stunServers: [String]
 

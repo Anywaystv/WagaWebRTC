@@ -27,7 +27,6 @@ public final class WagaPublisher: @unchecked Sendable {
     private var offerScheduled = false
     private let gatheringDelayMilliseconds: Int
     private let diagnostics: Bool
-    private var lastDiagnostic: UInt64 = 0
 
     public init(
         audio: WagaCodec = .opus,
@@ -49,6 +48,12 @@ public final class WagaPublisher: @unchecked Sendable {
             iceServers: iceServers,
             connectionPriorities: connectionPriorities
         )
+        if diagnostics {
+            network.onDiagnostic = { [weak self] message in
+                guard let self, !stopped else { return }
+                delegate?.wagaPublisherDiagnostic(message)
+            }
+        }
         network.onCandidate = { [weak self] candidate in
             self?.candidate(candidate)
         }
@@ -214,16 +219,6 @@ public final class WagaPublisher: @unchecked Sendable {
         }
         while let estimate = core.pollBitrateEstimate() {
             delegate?.wagaPublisherBitrateEstimate(estimate)
-        }
-        if diagnostics {
-            let now = DispatchTime.now().uptimeNanoseconds
-            if now - lastDiagnostic >= 1_000_000_000 {
-                lastDiagnostic = now
-                if var snapshot = core.bweDiagnosticSnapshot() {
-                    if let paths = network.diagnosticSnapshot() { snapshot += " \(paths)" }
-                    delegate?.wagaPublisherDiagnostic(snapshot)
-                }
-            }
         }
         scheduleTimeout()
     }
