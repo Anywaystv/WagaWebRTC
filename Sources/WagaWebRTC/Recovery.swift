@@ -29,7 +29,6 @@ struct WagaRecovery: Sendable {
     private var groups: [UInt32: [RecoveryPacket]] = [:]
     private var lastRepair: UInt64?
     private var repairCredit = 1500
-    private(set) var repairBytes = 0
 
     mutating func record(_ data: Data, transportSequence: UInt64? = nil,
                          now: UInt64 = DispatchTime.now().uptimeNanoseconds) -> Data? {
@@ -75,7 +74,6 @@ struct WagaRecovery: Sendable {
             history[id]?.lastTransmission = now
             lastRepair = now
             repairCredit -= packet.data.count
-            repairBytes += packet.data.count
             return [packet.data]
         }
         return []
@@ -84,16 +82,6 @@ struct WagaRecovery: Sendable {
     func transportSequence(for data: Data) -> UInt64? {
         guard let id = rtpPacketID(data) else { return nil }
         return history[id]?.transportSequence
-    }
-
-    mutating func removeAll() {
-        history.removeAll(keepingCapacity: true)
-        historyOrder.removeAll(keepingCapacity: true)
-        historyHead = 0
-        groups.removeAll(keepingCapacity: true)
-        lastRepair = nil
-        repairCredit = 1500
-        repairBytes = 0
     }
 
     private mutating func trimHistory() {

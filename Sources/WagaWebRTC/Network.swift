@@ -53,7 +53,7 @@ final class WagaNetwork: @unchecked Sendable {
         paths.values.forEach { $0.stop() }
         paths.removeAll()
         scheduler.replace([])
-        recovery.removeAll()
+        recovery = WagaRecovery()
         delivery = WagaDelivery()
         handoff = WagaHandoff()
     }

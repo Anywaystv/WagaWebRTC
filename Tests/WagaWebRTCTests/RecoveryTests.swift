@@ -51,21 +51,23 @@ final class RecoveryTests: XCTestCase {
         XCTAssertEqual(recovery.repairs(for: request, now: 180_000_001, minimumAge: 100_000_000), [])
     }
 
-    func testRepairBandwidthRequiresNewPrimaryTraffic() {
+    func testRepairBandwidthRequiresNewPrimaryTraffic() throws {
         var recovery = WagaRecovery()
         var packet = rtpPacket(sequenceNumber: 4)
         packet.append(Data(count: 1200 - packet.count))
         _ = recovery.record(packet, now: 1)
         let request = Data([0x57, 0x47, 0x52, 0x31, 2, 1, 0, 0, 1, 2, 3, 4, 0, 4])
-        XCTAssertEqual(recovery.repairs(for: request, now: 200_000_001), [packet])
+        let firstRepair = try XCTUnwrap(recovery.repairs(for: request, now: 200_000_001))
+        XCTAssertEqual(firstRepair, [packet])
         XCTAssertEqual(recovery.repairs(for: request, now: 1_000_000_001), [])
         for sequence in 5...20 {
             var next = packet
             next[3] = UInt8(sequence)
             _ = recovery.record(next, now: 1_000_000_001)
         }
-        XCTAssertEqual(recovery.repairs(for: request, now: 1_200_000_001), [packet])
-        XCTAssertEqual(recovery.repairBytes, 2400)
+        let secondRepair = try XCTUnwrap(recovery.repairs(for: request, now: 1_200_000_001))
+        XCTAssertEqual(secondRepair, [packet])
+        XCTAssertEqual((firstRepair + secondRepair).reduce(0) { $0 + $1.count }, 2400)
     }
 
     func testRtcpIsNotScheduledAsMedia() {
