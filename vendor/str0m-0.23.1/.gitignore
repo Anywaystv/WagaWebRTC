@@ -11,4 +11,11 @@ crates/fuzz/artifacts
 dimpl
 webrtc
 *.pcap
+!/tests/data/av1.pcap
+!/tests/data/contiguous_vp9.pcap
+!/tests/data/h264.pcap
+!/tests/data/h265.pcap
+!/tests/data/h266.pcap
+!/tests/data/vp8.pcap
+!/tests/data/vp9.pcap
 .wt

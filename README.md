@@ -44,9 +44,26 @@ str0m controls the total sending rate, bandwidth probing and application-limited
 
 ### Bonding and recovery
 
-Receiver delivery receipts guide routing alongside connection priorities, RTT and socket backlog. Idle paths receive occasional media samples. Missing receipts expire after one second and reduce that path's allowance. These windows count unique encrypted RTP packets, not parity or duplicate repairs, and add no playout delay. If all paths are full, traffic uses the best available route rather than being discarded. Without receipts, routing uses RTT and socket backlog.
+Bonded WHIP uses SRTLA-inspired packet assignment: each path is ranked by unacknowledged traffic plus the next packet, divided by its delivery window. Windows use bytes because RTP packet sizes vary. Successful receipts grow a busy path faster than idle samples; missing receipts expire after one second and reduce only that path's window. Priorities are normalized to the lowest active priority before fading toward equal weight as a path's window shrinks. Thus 10/9 and 1/0.9 behave alike, including after a missing receipt. Paths with delivery tracking use a relative RTT cost as a floor, bounded below one window of load. The scheduler takes the larger of this floor and the outstanding-traffic score, so RTT is not charged again once traffic is in flight. This favors faster delivery while allowing backlog to shift traffic to another path. RTT breaks equal scores. Socket-pending media is not counted a second time.
 
-A shared 4096-packet history allows repairs over another healthy path. One XOR parity datagram per eight encrypted RTP packets can recover one missing packet without a round trip, at about 12.5% overhead. Larger losses require history-based repairs; WagaStrim deduplicates retransmissions.
+Windows guide packet assignment without blocking already-paced traffic or pinning a handoff to one path. Idle paths still receive occasional duplicate media samples. Receipts count unique encrypted RTP packets, excluding parity and duplicate repairs, and add no playout delay. New paths start with a provisional 32 KB window and RTT weighting; receipts then adjust the windows. Revalidation preserves that history and packets still in flight. Traffic redistribution requests a capacity probe without resetting the shared estimator. str0m still controls the shared transport rate and bandwidth probes; this scheduling change does not replace WebRTC congestion control with SRT's.
+
+The sender records each packet's actual route alongside its TWCC sequence.
+Delay trends are measured separately on each route, so queueing on one route can
+shift traffic to another before reducing the shared rate. Probe measurements remove
+each route's minimum transit delay while retaining queue growth. Aggregate throughput
+uses the original feedback. Loss accounting waits two feedback intervals plus the
+measured path delay difference (at most one second) for reordered arrivals.
+Packets duplicated across routes have an ambiguous winning path and contribute
+to throughput and loss, but not path timing. This metadata is local to the sender
+and does not change the RTP wire format or require an ingest upgrade.
+
+Optional publisher diagnostics report interface readiness, availability changes,
+removal, and transport disconnects. They do not emit periodic bandwidth or packet
+counter dumps. The native estimator snapshot remains available on demand for
+debugging and regression tests.
+
+A shared 4096-packet history allows repairs over another healthy path. One XOR parity datagram per eight encrypted RTP packets can recover one missing packet without a round trip, at about 12.5% overhead. History repairs wait at least the measured path RTT (100 ms to one second), use at most one packet every 20 ms, and receive 1/16 of primary traffic as byte credit, capped at 1500 bytes. Retransmitted ciphertext marks its original TWCC route ambiguous so delayed repairs cannot masquerade as probe congestion. Native WebRTC NACK/RTX remains available; WagaStrim deduplicates retransmissions.
 
 An established publisher keeps its session for up to 15 seconds after an ICE disconnect. Bonded sockets retry independently, replacing sockets stuck connecting after 5 seconds. Removed or silent paths are withdrawn; authenticated replies can restore them. Each interface uses its own validated receiver address, allowing LAN access over Wi-Fi and public access over cellular.
 

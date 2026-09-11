@@ -37,6 +37,14 @@ public struct WagaDatagram: Sendable {
     public let source: String
     public let destination: String
     public let data: Data
+    public let transportSequence: UInt64?
+
+    init(source: String, destination: String, data: Data, transportSequence: UInt64? = nil) {
+        self.source = source
+        self.destination = destination
+        self.data = data
+        self.transportSequence = transportSequence
+    }
 }
 
 public struct WagaMediaFrame: Sendable {
@@ -175,11 +183,17 @@ final class WagaCore: @unchecked Sendable {
         else {
             return nil
         }
+        let sequence = waga_peer_last_transmit_sequence(peer)
         return WagaDatagram(
             source: String(cString: source),
             destination: String(cString: destination),
-            data: Data(bytes: data, count: output.length)
+            data: Data(bytes: data, count: output.length),
+            transportSequence: sequence == .max ? nil : sequence
         )
+    }
+
+    func setEgressPath(sequence: UInt64, path: UInt64?) {
+        waga_peer_set_egress_path(peer, sequence, path ?? .max)
     }
 
     func pollEvent() -> WagaPeerEvent? {

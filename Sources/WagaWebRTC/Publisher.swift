@@ -27,7 +27,6 @@ public final class WagaPublisher: @unchecked Sendable {
     private var offerScheduled = false
     private let gatheringDelayMilliseconds: Int
     private let diagnostics: Bool
-    private var lastDiagnostic: UInt64 = 0
 
     public init(
         audio: WagaCodec = .opus,
@@ -49,6 +48,12 @@ public final class WagaPublisher: @unchecked Sendable {
             iceServers: iceServers,
             connectionPriorities: connectionPriorities
         )
+        if diagnostics {
+            network.onDiagnostic = { [weak self] message in
+                guard let self, !stopped else { return }
+                delegate?.wagaPublisherDiagnostic(message)
+            }
+        }
         network.onCandidate = { [weak self] candidate in
             self?.candidate(candidate)
         }
@@ -64,7 +69,7 @@ public final class WagaPublisher: @unchecked Sendable {
         network.onReceive = { [weak self] source, destination, data in
             self?.receive(source: source, destination: destination, data: data)
         }
-        network.onPathValidated = { [weak self] in
+        network.onPathCapacityChanged = { [weak self] in
             guard let self, !stopped else { return }
             do {
                 try core.requestPathProbe()
@@ -73,14 +78,8 @@ public final class WagaPublisher: @unchecked Sendable {
                 delegate?.wagaPublisherFailed(String(describing: error))
             }
         }
-        network.onHandoff = { [weak self] in
-            guard let self, !stopped else { return }
-            do {
-                try core.restartOnPathChange()
-                drain()
-            } catch {
-                delegate?.wagaPublisherFailed(String(describing: error))
-            }
+        network.onTransmitPath = { [weak self] sequence, path in
+            self?.core.setEgressPath(sequence: sequence, path: path)
         }
         network.onServerReflexiveCandidate = { [weak self] address, base in
             self?.serverReflexiveCandidate(address, base: base)
@@ -220,15 +219,6 @@ public final class WagaPublisher: @unchecked Sendable {
         }
         while let estimate = core.pollBitrateEstimate() {
             delegate?.wagaPublisherBitrateEstimate(estimate)
-        }
-        if diagnostics {
-            let now = DispatchTime.now().uptimeNanoseconds
-            if now - lastDiagnostic >= 1_000_000_000 {
-                lastDiagnostic = now
-                if let snapshot = core.bweDiagnosticSnapshot() {
-                    delegate?.wagaPublisherDiagnostic(snapshot)
-                }
-            }
         }
         scheduleTimeout()
     }

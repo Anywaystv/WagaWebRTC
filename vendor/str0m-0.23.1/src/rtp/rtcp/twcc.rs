@@ -1068,7 +1068,7 @@ impl TwccPacketId {
 }
 
 /// Record for a send entry in twcc.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TwccSendRecord {
     /// Packet identification (sequence + optional probe cluster)
     packet_id: TwccPacketId,
@@ -1080,9 +1080,19 @@ pub struct TwccSendRecord {
     size: u16,
 
     recv_report: Option<TwccRecvReport>,
+    pub(crate) egress_path: Option<u64>,
+    pub(crate) redundant: bool,
 }
 
 impl TwccSendRecord {
+    pub(crate) fn with_receive_time(&self, time: Instant) -> Self {
+        let mut record = self.clone();
+        if let Some(report) = &mut record.recv_report {
+            report.remote_recv_time = Some(time);
+        }
+        record
+    }
+
     /// The twcc sequence number of the packet we sent.
     pub fn seq(&self) -> TwccSeq {
         self.packet_id.seq()
@@ -1136,6 +1146,8 @@ impl TwccSendRecord {
             packet_id,
             local_send_time,
             size: size as u16,
+            egress_path: None,
+            redundant: false,
             recv_report: Some(TwccRecvReport {
                 local_recv_time,
                 remote_recv_time,
@@ -1178,9 +1190,18 @@ impl TwccSendRegister {
             size: size as u16,
             // The recv report, derived from TWCC feedback later.
             recv_report: None,
+            egress_path: None,
+            redundant: false,
         });
         while self.queue.len() > self.keep {
             self.queue.pop_front();
+        }
+    }
+
+    pub fn set_egress_path(&mut self, seq: TwccSeq, path: Option<u64>) {
+        if let Ok(index) = self.queue.binary_search_by_key(&seq, |record| record.seq()) {
+            self.queue[index].egress_path = path;
+            self.queue[index].redundant = path.is_none();
         }
     }
 

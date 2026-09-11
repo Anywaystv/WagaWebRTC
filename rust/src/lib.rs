@@ -9,6 +9,8 @@ use str0m::media::{Direction, Frequency, MediaKind, MediaTime};
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig};
 
+#[cfg(all(test, target_os = "macos"))]
+mod bonding_tests;
 mod ffi;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,6 +34,7 @@ pub struct Transmit {
     pub source: SocketAddr,
     pub destination: SocketAddr,
     pub contents: Vec<u8>,
+    pub transport_sequence: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -425,6 +428,7 @@ impl Publisher {
                     source: transmit.source,
                     destination: transmit.destination,
                     contents: transmit.contents.into(),
+                    transport_sequence: self.rtc.last_transmit_sequence(),
                 }),
                 Output::Event(event) => match event {
                     Event::Connected => {
@@ -920,6 +924,7 @@ mod tests {
         let mut feedback = VecDeque::new();
         let mut early_probes = 0;
         let mut late_probes = 0;
+        let mut tagged_packets = 0;
         let mut estimates = Vec::new();
         for millis in 0..12_000_u64 {
             let now = start + Duration::from_millis(millis);
@@ -945,6 +950,10 @@ mod tests {
                 publisher.drain().unwrap();
             }
             while let Some(packet) = publisher.poll_transmit() {
+                if packet.transport_sequence.is_some() {
+                    tagged_packets += 1;
+                    assert!(packet.contents.len() >= 12 && packet.contents[0] & 0xc0 == 0x80);
+                }
                 if packet.contents.len() >= 12
                     && packet.contents[0] & 0xc0 == 0x80
                     && rtx_pts.contains(&(packet.contents[1] & 0x7f))
@@ -986,6 +995,10 @@ mod tests {
         assert!(publisher.rtc.is_connected());
         assert!(early_probes > 0, "startup probes were not sent");
         assert!(late_probes > 0, "ALR did not trigger periodic probing");
+        assert!(
+            tagged_packets > 0,
+            "transport did not receive TWCC sequence metadata"
+        );
         assert!(
             estimates.iter().any(|rate| *rate > 500_000),
             "TWCC did not raise the starting estimate: {estimates:?}"

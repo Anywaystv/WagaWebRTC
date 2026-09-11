@@ -4,48 +4,6 @@ import Foundation
 import XCTest
 
 final class DeliveryTests: XCTestCase {
-    func testProbePinYieldsWhenWindowFillsInEitherDirection() {
-        for pinned in ["wifi", "cell"] {
-            let other = pinned == "wifi" ? "cell" : "wifi"
-            var delivery = WagaDelivery()
-            let first = Data([255])
-            delivery.record(first, path: pinned, remote: "server", now: 1)
-            _ = delivery.receive(receiptFor(first), path: pinned, remote: "server", now: 2)
-            var scheduler = WagaPathScheduler()
-            let scores = [other, pinned].map {
-                WagaPathScore(id: $0, priority: 1, smoothedRttMilliseconds: $0 == other ? 5 : 100,
-                              pendingBytes: 0)
-            }
-            scheduler.replace(scores)
-            XCTAssertEqual(delivery.routes(scheduler, bytes: 1200, now: 3, probing: pinned), [pinned])
-            for index in 0 ..< 26 {
-                delivery.record(Data(repeating: UInt8(index), count: 1200),
-                                path: pinned, remote: "server", now: 4)
-            }
-            XCTAssertFalse(delivery.allows(pinned, bytes: 1200))
-            XCTAssertEqual(delivery.routes(scheduler, bytes: 1200, now: 5, probing: pinned), [other])
-            scheduler.replace(scores.filter { $0.id == pinned })
-            XCTAssertEqual(delivery.routes(scheduler, bytes: 1200, now: 5, probing: pinned), [pinned])
-        }
-    }
-
-    func testProbePinRequiresFreshReceiptAndActiveRoute() {
-        var delivery = WagaDelivery()
-        var scheduler = WagaPathScheduler()
-        let wifi = WagaPathScore(id: "wifi", priority: 1, smoothedRttMilliseconds: 100, pendingBytes: 0)
-        let cell = WagaPathScore(id: "cell", priority: 1, smoothedRttMilliseconds: 5, pendingBytes: 0)
-        scheduler.replace([wifi, cell])
-        XCTAssertEqual(delivery.routes(scheduler, bytes: 1200, now: 1, probing: "wifi"), ["cell"])
-        let packet = Data([1])
-        delivery.record(packet, path: "wifi", remote: "server", now: 1)
-        _ = delivery.receive(receiptFor(packet), path: "wifi", remote: "server", now: 2)
-        XCTAssertEqual(delivery.routes(scheduler, bytes: 1200, now: 3, probing: "wifi"), ["wifi"])
-        XCTAssertEqual(delivery.routes(scheduler, bytes: 1200, now: WagaDelivery.lifetime + 2,
-                                       probing: "wifi").first, "cell")
-        scheduler.replace([cell])
-        XCTAssertEqual(delivery.routes(scheduler, bytes: 1200, now: 3, probing: "wifi"), ["cell"])
-    }
-
     func testReceiptsRequireMatchingPacketAndBothAddresses() {
         var delivery = WagaDelivery()
         let packet = Data(repeating: 42, count: 1200)
@@ -74,15 +32,13 @@ final class DeliveryTests: XCTestCase {
         }
         for index in 0 ..< 26 {
             let packet = Data(repeating: UInt8(index), count: 1200)
-            XCTAssertTrue(delivery.allows("wifi", bytes: packet.count))
             delivery.record(packet, path: "wifi", remote: "server", now: 3)
         }
-        XCTAssertFalse(delivery.allows("wifi", bytes: 1200))
-        XCTAssertTrue(delivery.allows("cell", bytes: 1200))
+        XCTAssertGreaterThan(delivery.paths["wifi"]!.outstanding + 1200, delivery.paths["wifi"]!.window)
+        XCTAssertEqual(delivery.paths["cell"]!.outstanding, 0)
         delivery.expire(now: WagaDelivery.lifetime + 4)
         XCTAssertEqual(delivery.paths["wifi"]?.outstanding, 0)
         XCTAssertEqual(delivery.paths["wifi"]?.window, 16_000)
-        XCTAssertTrue(delivery.allows("wifi", bytes: 1200))
     }
 
     func testLegacyReceiverNeverNeedsReceiptsAndHistoryIsBounded() {
@@ -92,7 +48,6 @@ final class DeliveryTests: XCTestCase {
             let packet = withUnsafeBytes(of: &value) { Data($0) }
             delivery.record(packet, path: "wifi", remote: "server", now: 1)
         }
-        XCTAssertTrue(delivery.allows("wifi", bytes: 1200))
         XCTAssertLessThanOrEqual(delivery.paths["wifi"]!.outstanding, 4096 * MemoryLayout<Int>.size)
         delivery.expire(now: WagaDelivery.lifetime + 1)
         XCTAssertEqual(delivery.paths["wifi"]?.outstanding, 0)
@@ -121,6 +76,33 @@ final class DeliveryTests: XCTestCase {
         XCTAssertFalse(delivery.paths["wifi"]!.confirmed)
         delivery.expire(now: WagaDelivery.lifetime + 2)
         XCTAssertEqual(delivery.paths["wifi"]?.outstanding, 1)
+    }
+
+    func testRevalidationDoesNotRestoreAnUnprovenFullWindow() {
+        var delivery = WagaDelivery()
+        let confirmed = Data([1])
+        delivery.record(confirmed, path: "cell", remote: "server", now: 1)
+        _ = delivery.receive(receiptFor(confirmed), path: "cell", remote: "server", now: 2)
+        for index in 2...3 {
+            delivery.record(Data([UInt8(index)]), path: "cell", remote: "server",
+                            now: UInt64(index - 1) * WagaDelivery.lifetime)
+            delivery.expire(now: UInt64(index) * WagaDelivery.lifetime)
+        }
+        let reduced = delivery.paths["cell"]!.window
+        XCTAssertLessThan(reduced, 16_000)
+        let old = Data([4])
+        delivery.record(old, path: "cell", remote: "server", now: 3_000_000_001)
+        delivery.revalidatePath("cell", now: 3_100_000_001)
+        XCTAssertEqual(delivery.paths["cell"]?.window, reduced)
+        XCTAssertEqual(delivery.paths["cell"]?.outstanding, old.count)
+        XCTAssertEqual(delivery.paths["cell"]?.receivedPackets, 0)
+        _ = delivery.receive(receiptFor(old), path: "cell", remote: "server", now: 3_200_000_001)
+        XCTAssertEqual(delivery.paths["cell"]?.outstanding, 0)
+        XCTAssertEqual(delivery.paths["cell"]?.receivedPackets, 1)
+        let fresh = Data([5])
+        delivery.record(fresh, path: "cell", remote: "server", now: 3_300_000_001)
+        _ = delivery.receive(receiptFor(fresh), path: "cell", remote: "server", now: 3_400_000_001)
+        XCTAssertTrue(delivery.paths["cell"]!.confirmed)
     }
 
     func testSchedulerPrefersAvailableDeliveryWindow() {
@@ -195,9 +177,10 @@ final class DeliveryTests: XCTestCase {
                     if let state = delivery.paths[id] {
                         score.deliveryLoad = Double(state.outstanding) / Double(state.window)
                     }
+                    score.deliveryWindow = delivery.paths[id]?.window ?? 32_000
                     return score
                 }
-                scheduler.replace(delivery.preferredPaths(paths, bytes: 1200))
+                scheduler.replace(paths)
                 let selected = scheduler.select()!
                 if selected == fast { fastPackets += 1 }
                 let data = Data(repeating: UInt8(index), count: 1200)
@@ -272,6 +255,7 @@ final class DeliveryTests: XCTestCase {
                     if let state = delivery.paths[id] {
                         score.deliveryLoad = Double(state.outstanding) / Double(state.window)
                     }
+                    score.deliveryWindow = delivery.paths[id]?.window ?? 32_000
                     return score
                 })
                 let routes = delivery.routes(scheduler, bytes: 1200, now: now)
@@ -297,9 +281,8 @@ final class DeliveryTests: XCTestCase {
             }
             XCTAssertFalse(handoff.update([slow], now: 600_000_000))
             XCTAssertTrue(handoff.update([slow, fast], now: 600_000_000))
-            XCTAssertEqual(handoff.probingPath(now: 600_000_001), fast)
+            XCTAssertEqual(handoff.primary, fast)
             XCTAssertFalse(handoff.update([slow, fast], now: 600_000_002))
-            XCTAssertNil(handoff.probingPath(now: 5_600_000_000))
         }
     }
 
@@ -320,23 +303,114 @@ final class DeliveryTests: XCTestCase {
         XCTAssertTrue(handoff.update(["wifi"], now: 2_600_000_001))
     }
 
-    func testFullCellularWindowStillRoutesMediaAndRepairs() {
-        var delivery = WagaDelivery()
-        let first = Data([99])
-        delivery.record(first, path: "cell", remote: "server", now: 1)
-        XCTAssertTrue(delivery.receive(receiptFor(first), path: "cell", remote: "server", now: 2))
-        let cell = WagaPathScore(id: "cell", priority: 1, smoothedRttMilliseconds: 450, pendingBytes: 0)
+    func testFullWindowStillRoutesMediaAndRepairs() {
+        var cell = WagaPathScore(id: "cell", priority: 1, smoothedRttMilliseconds: 450, pendingBytes: 0)
+        cell.deliveryWindow = 32_000
+        cell.deliveryLoad = 4
         var scheduler = WagaPathScheduler()
-        for index in 0 ..< 200 {
-            let packet = Data(repeating: UInt8(index), count: 1200)
-            scheduler.replace(delivery.preferredPaths([cell], bytes: packet.count))
-            XCTAssertEqual(scheduler.select(), "cell")
-            delivery.record(packet, path: "cell", remote: "server", now: UInt64(index + 3))
-        }
-        XCTAssertFalse(delivery.allows("cell", bytes: 1200))
-        XCTAssertEqual(delivery.preferredPaths([cell], bytes: 1200).map(\.id), ["cell"])
+        scheduler.replace([cell])
+        let delivery = WagaDelivery()
+        XCTAssertEqual(delivery.routes(scheduler, bytes: 1200, now: 1), ["cell"])
         let wifi = WagaPathScore(id: "wifi", priority: 1, smoothedRttMilliseconds: 10, pendingBytes: 0)
-        XCTAssertEqual(delivery.preferredPaths([cell, wifi], bytes: 1200).map(\.id), ["wifi"])
-        XCTAssertTrue(delivery.preferredPaths([], bytes: 1200).isEmpty)
+        scheduler.replace([cell, wifi])
+        XCTAssertEqual(delivery.routes(scheduler, bytes: 1200, now: 1), ["wifi"])
+        scheduler.replace([])
+        XCTAssertTrue(delivery.routes(scheduler, bytes: 1200, now: 1).isEmpty)
+    }
+
+    func testReceiptWindowRanksCapacityEvenWhenBothPathsAreIdle() {
+        var wifi = WagaPathScore(id: "wifi", priority: 1, smoothedRttMilliseconds: 100, pendingBytes: 0)
+        var cell = WagaPathScore(id: "cell", priority: 1, smoothedRttMilliseconds: 10, pendingBytes: 0)
+        wifi.deliveryWindow = 64_000
+        cell.deliveryWindow = 16_000
+        var scheduler = WagaPathScheduler()
+        scheduler.replace([cell, wifi])
+        XCTAssertEqual(scheduler.select(), "wifi")
+        wifi.deliveryLoad = 0.5
+        scheduler.replace([cell, wifi])
+        XCTAssertEqual(scheduler.select(), "cell")
+    }
+
+    func testReducedWindowRemovesPriorityAdvantageUntilRecovery() {
+        var wifi = WagaPathScore(id: "wifi", priority: 10, smoothedRttMilliseconds: 10, pendingBytes: 0)
+        var cell = WagaPathScore(id: "cell", priority: 1, smoothedRttMilliseconds: 100, pendingBytes: 0)
+        wifi.deliveryWindow = 8_000
+        cell.deliveryWindow = 32_000
+        var scheduler = WagaPathScheduler()
+        scheduler.replace([wifi, cell])
+        XCTAssertEqual(scheduler.select(), "cell")
+        wifi.deliveryWindow = 32_000
+        scheduler.replace([wifi, cell])
+        XCTAssertEqual(scheduler.select(), "wifi")
+    }
+
+    func testStartupWindowReductionDoesNotAmplifyCellularPriority() {
+        // Snapshot just before the live startup shifted onto slower cellular.
+        for scale in [0.1, 1.0, 10.0] {
+            var wifi = WagaPathScore(id: "wifi", priority: 10 * scale,
+                                     smoothedRttMilliseconds: 32, pendingBytes: 0)
+            wifi.deliveryWindow = 16_527
+            wifi.deliveryLoad = 1772.0 / 16_527
+            var cell = WagaPathScore(id: "cell", priority: 9 * scale,
+                                     smoothedRttMilliseconds: 73, pendingBytes: 0)
+            cell.deliveryWindow = 32_299
+            cell.deliveryLoad = 12809.0 / 32_299
+            var scheduler = WagaPathScheduler()
+            scheduler.replace([wifi, cell])
+            XCTAssertEqual(scheduler.select(), "wifi", "Priority scale \(scale)")
+        }
+    }
+
+    func testSocketPendingMediaIsNotChargedTwice() {
+        var wifi = WagaPathScore(id: "wifi", priority: 1, smoothedRttMilliseconds: 20, pendingBytes: 12_000)
+        var cell = WagaPathScore(id: "cell", priority: 1, smoothedRttMilliseconds: 100, pendingBytes: 0)
+        wifi.deliveryWindow = 32_000
+        wifi.deliveryLoad = 12_000.0 / 32_000
+        cell.deliveryWindow = 32_000
+        cell.deliveryLoad = 18_000.0 / 32_000
+        var scheduler = WagaPathScheduler()
+        scheduler.replace([wifi, cell])
+        XCTAssertEqual(scheduler.select(), "wifi")
+    }
+
+    func testLatencyPreferenceYieldsToOutstandingTraffic() {
+        for fast in ["wifi", "cell"] {
+            for scale in [0.1, 1.0, 10.0] {
+                let slow = fast == "wifi" ? "cell" : "wifi"
+                var quicker = WagaPathScore(id: fast, priority: 10 * scale,
+                                           smoothedRttMilliseconds: 20, pendingBytes: 0)
+                quicker.deliveryWindow = 32_000
+                quicker.deliveryLoad = 0.1
+                var slower = WagaPathScore(id: slow, priority: 9 * scale,
+                                          smoothedRttMilliseconds: 80, pendingBytes: 0)
+                slower.deliveryWindow = 32_000
+                slower.deliveryLoad = 0.2
+                var scheduler = WagaPathScheduler()
+                scheduler.replace([quicker, slower])
+                XCTAssertEqual(scheduler.select(), fast)
+                quicker.deliveryLoad = 0.9
+                scheduler.replace([quicker, slower])
+                XCTAssertEqual(scheduler.select(), slow)
+            }
+        }
+    }
+
+    func testBusyReceiptWindowGrowsFasterThanIdleSamples() {
+        var delivery = WagaDelivery()
+        for index in 0 ..< 40 {
+            delivery.record(Data(repeating: UInt8(index), count: 1200),
+                            path: "busy", remote: "server", now: 1)
+        }
+        let packet = Data(repeating: 0, count: 1200)
+        // Use different ciphertext: identical copies are deliberately tracked once.
+        let idle = Data(repeating: 255, count: 1200)
+        delivery.record(idle, path: "idle", remote: "server", now: 1)
+        _ = delivery.receive(receiptFor(packet), path: "busy", remote: "server", now: 2)
+        _ = delivery.receive(receiptFor(idle), path: "idle", remote: "server", now: 2)
+        XCTAssertGreaterThan(delivery.paths["busy"]!.window, delivery.paths["idle"]!.window)
+        XCTAssertEqual(delivery.paths["idle"]!.window, 32_001)
+        let window = delivery.paths["busy"]!.window
+        _ = delivery.receive(receiptFor(packet), path: "busy", remote: "server", now: 3)
+        XCTAssertEqual(delivery.paths["busy"]!.window, window)
     }
 }

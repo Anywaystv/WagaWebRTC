@@ -64,21 +64,22 @@ pub fn bwe_cellular() -> Result<(), RtcError> {
     init_log();
     init_crypto_default();
 
-    let mut plan = RAMP_UP_SINGLE.to_vec();
-    plan[0] = Step::Conditions {
-        description: "Cellular conditions",
-        config: NetemConfig::cellular().seed(42),
-    };
-    plan[2] = Step::Run {
-        description: "Wait for mid",
-        duration: Duration::from_secs(40),
-    };
+    for seed in [42, 1, 99] {
+        println!("cellular seed={seed}");
+        let mut plan = RAMP_UP_SINGLE.to_vec();
+        plan[0] = Step::Conditions {
+            description: "Cellular conditions",
+            config: NetemConfig::cellular().seed(seed),
+        };
+        plan[2] = Step::Run {
+            description: "Wait for mid",
+            duration: Duration::from_secs(40),
+        };
 
-    let (mut l, mut r) = connect_with_bwe(LAYER_LOW, LAYER_MID);
-
-    let mut ctx = BweTestContext::new(&mut l, &mut r);
-
-    ctx.run_plan(&mut l, &mut r, &plan)?;
+        let (mut l, mut r) = connect_with_bwe(LAYER_LOW, LAYER_MID);
+        let mut ctx = BweTestContext::new(&mut l, &mut r);
+        ctx.run_plan(&mut l, &mut r, &plan)?;
+    }
 
     Ok(())
 }
@@ -99,7 +100,7 @@ pub fn bwe_wifi_normal() -> Result<(), RtcError> {
 
     let mut ctx = BweTestContext::new(&mut l, &mut r);
 
-    ctx.run_plan(&mut l, &mut r, &RAMP_UP_SINGLE)?;
+    ctx.run_plan(&mut l, &mut r, &plan)?;
 
     Ok(())
 }
@@ -120,7 +121,7 @@ pub fn bwe_wifi_congested() -> Result<(), RtcError> {
 
     let mut ctx = BweTestContext::new(&mut l, &mut r);
 
-    ctx.run_plan(&mut l, &mut r, &RAMP_UP_SINGLE)?;
+    ctx.run_plan(&mut l, &mut r, &plan)?;
 
     Ok(())
 }

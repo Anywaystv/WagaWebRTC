@@ -34,6 +34,7 @@ struct OwnedTransmit {
     source: CString,
     destination: CString,
     data: Vec<u8>,
+    transport_sequence: Option<u64>,
 }
 
 impl From<Transmit> for OwnedTransmit {
@@ -43,6 +44,7 @@ impl From<Transmit> for OwnedTransmit {
             destination: CString::new(value.destination.to_string())
                 .expect("socket address has no NUL"),
             data: value.contents,
+            transport_sequence: value.transport_sequence,
         }
     }
 }
@@ -312,6 +314,24 @@ pub extern "C" fn waga_peer_poll_transmit(peer: *mut WagaPeer, output: *mut Waga
         true
     } else {
         false
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn waga_peer_last_transmit_sequence(peer: *mut WagaPeer) -> u64 {
+    peer_mut(peer)
+        .ok()
+        .and_then(|peer| peer.transmit.as_ref())
+        .and_then(|transmit| transmit.transport_sequence)
+        .unwrap_or(u64::MAX)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn waga_peer_set_egress_path(peer: *mut WagaPeer, sequence: u64, path: u64) {
+    if let Ok(peer) = peer_mut(peer) {
+        peer.publisher
+            .rtc
+            .set_egress_path(sequence, (path != u64::MAX).then_some(path));
     }
 }
 

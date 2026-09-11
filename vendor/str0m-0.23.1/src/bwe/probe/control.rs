@@ -302,7 +302,12 @@ impl ProbeControl {
             return false;
         }
 
-        // Queue 3× and 6× of estimate.
+        // Validate a full-rate startup without a burst above its allocation.
+        if estimate >= desired {
+            self.queue_probe(desired, ProbeKind::Initial, desired, now);
+            return true;
+        }
+        // Below the allocation, discover capacity with exponential probes.
         let p1 = estimate * self.config.first_exponential_probe_scale;
         let p2 = estimate * self.config.second_exponential_probe_scale;
 
@@ -321,6 +326,13 @@ impl ProbeControl {
         let Some(last) = self.last_probe else {
             return false;
         };
+
+        if last.kind == ProbeKind::Initial
+            && last.was_estimate.is_some_and(|initial| initial >= desired)
+            && estimate >= desired
+        {
+            return false;
+        }
 
         // Estimate must exceed 70% of last probe rate to trigger further probing.
         if estimate < last.further {
@@ -958,9 +970,9 @@ mod test {
         pc.set_desired_bitrate(Bitrate::mbps(1));
         pc.set_estimated_bitrate(Bitrate::mbps(1), BandwidthLimitedCause::DelayBasedLimited);
 
-        // Drain initial probes.
-        let _ = pc.handle_timeout(now).unwrap();
-        let _ = pc.handle_timeout(now).unwrap();
+        // Full-allocation startup validates once before waiting for feedback.
+        assert_eq!(pc.handle_timeout(now).unwrap().target_bitrate(), Bitrate::mbps(1));
+        assert!(pc.handle_timeout(now).is_none());
 
         // Time out waiting for probing result -> probing complete.
         assert!(pc.handle_timeout(now + Duration::from_secs(2)).is_none());

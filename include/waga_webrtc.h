@@ -77,6 +77,9 @@ bool waga_peer_set_desired_bitrate(WagaPeer *peer, uint64_t bitrate);
 bool waga_peer_request_path_probe(WagaPeer *peer);
 bool waga_peer_restart_on_path_change(WagaPeer *peer);
 bool waga_peer_poll_transmit(WagaPeer *peer, WagaTransmit *output);
+uint64_t waga_peer_last_transmit_sequence(WagaPeer *peer);
+/* UINT64_MAX denotes no sequence above, or an ambiguous redundant path below. */
+void waga_peer_set_egress_path(WagaPeer *peer, uint64_t sequence, uint64_t path);
 int32_t waga_peer_poll_event(WagaPeer *peer);
 bool waga_peer_poll_media(WagaPeer *peer, WagaMedia *output);
 bool waga_peer_poll_bitrate_estimate(WagaPeer *peer, uint64_t *output);

@@ -336,8 +336,20 @@ impl LossController {
             return;
         }
 
+        // An ALR capacity cap can keep the estimate unchanged and block the probe
+        // needed to refresh it. After HOLD, a full loss-free window permits probing
+        // again without raising the estimate or discarding the capacity cap.
+        let alr_recovered = self.state == LossControllerState::Decreasing
+            && self.is_in_alr()
+            && loss_limited_bandwidth == self.current_estimate.loss_limited_bandwidth
+            && self
+                .observations
+                .iter()
+                .all(|o| o.is_initialized && o.num_lost_packets == 0);
+
         // State transitions with HOLD mechanism (WebRTC lines 336-378)
-        let new_state = if self.is_estimate_increasing_when_loss_limited(best_candidate)
+        let new_state = if (self.is_estimate_increasing_when_loss_limited(best_candidate)
+            || alr_recovered)
             && loss_limited_bandwidth < delay_based_estimated
             && loss_limited_bandwidth < self.max_bitrate
         {
@@ -1251,6 +1263,50 @@ mod test {
             "Estimate should increase to delay based estimate, but not further"
         );
         assert_eq!(state, LossControllerState::DelayBased);
+    }
+
+    #[test]
+    fn alr_capacity_cap_releases_after_clean_window_and_hold() {
+        for (hold_seconds, lost) in [(0, false), (6, false), (0, true)] {
+            let now = Instant::now();
+            let capacity = Bitrate::kbps(450);
+            let mut controller = LossController::new();
+            controller.set_alr_start_time(Some(now));
+            controller.set_bandwidth_estimate(capacity);
+            controller.set_link_capacity_estimate(Some(capacity));
+            controller.set_acknowledged_bitrate(Bitrate::kbps(250));
+            controller.state = LossControllerState::Decreasing;
+            controller.last_hold_info.timestamp =
+                super::Timestamp::Exact(now + Duration::from_secs(hold_seconds));
+            controller.last_hold_info.rate = capacity;
+
+            for tick in 0..30 {
+                let sent = now + Duration::from_millis(tick * 300);
+                let packets: Vec<_> = (0..8)
+                    .map(|index| PacketResult {
+                        local_send_time: sent + Duration::from_millis(index * 30),
+                        size: DataSize::bytes(1200),
+                        lost: lost && index == 0,
+                    })
+                    .collect();
+                controller.update_bandwidth_estimate(&packets, Bitrate::kbps(600));
+                assert_eq!(
+                    controller.loss_based_result().bandwidth_estimate,
+                    Some(capacity)
+                );
+                if tick < 15 || sent < now + Duration::from_secs(hold_seconds) {
+                    assert_eq!(controller.state, LossControllerState::Decreasing);
+                }
+            }
+            assert_eq!(
+                controller.state,
+                if lost {
+                    LossControllerState::Decreasing
+                } else {
+                    LossControllerState::Increasing
+                }
+            );
+        }
     }
 
     #[test]

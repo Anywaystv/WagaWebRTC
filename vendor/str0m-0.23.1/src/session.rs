@@ -90,6 +90,7 @@ pub(crate) struct Session {
     twcc: u64,
     twcc_rx_register: TwccRecvRegister,
     twcc_tx_register: TwccSendRegister,
+    pub(crate) last_transmit_sequence: Option<u64>,
     max_rx_seq_lookup: HashMap<Ssrc, SeqNo>,
 
     bwe: Option<Bwe>,
@@ -197,6 +198,7 @@ impl Session {
             twcc: 0,
             twcc_rx_register: TwccRecvRegister::new(100),
             twcc_tx_register: TwccSendRegister::new(1000),
+            last_transmit_sequence: None,
             max_rx_seq_lookup: HashMap::new(),
             bwe,
             enable_twcc_feedback: false,
@@ -898,6 +900,10 @@ impl Session {
         self.srtp_rx.is_some() && self.srtp_tx.is_some()
     }
 
+    pub fn set_egress_path(&mut self, sequence: u64, path: Option<u64>) {
+        self.twcc_tx_register.set_egress_path(sequence.into(), path);
+    }
+
     pub fn poll_datagram(&mut self, now: Instant) -> Option<net::DatagramSend> {
         // Time must have progressed forward from start value.
         if now == already_happened() {
@@ -1035,6 +1041,7 @@ impl Session {
         }
 
         let protected = srtp_tx.protect_rtp(buf, &header, *seq_no);
+        self.last_transmit_sequence = twcc_enabled.then_some(twcc_seq);
 
         if twcc_enabled {
             let packet_id = if let Some(cluster) = cluster_id {
