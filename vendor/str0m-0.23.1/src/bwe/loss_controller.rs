@@ -791,20 +791,21 @@ impl LossController {
         }
 
         let average_reported_loss_ratio = self.average_reported_loss_ratio();
+        let bandwidth_kbps = bandwidth.as_f64() / 1000.0;
 
         self.adjust_bias_factor(
             average_reported_loss_ratio,
             self.config.higher_bandwidth_bias_factor,
-        ) * bandwidth.as_f64()
+        ) * bandwidth_kbps
             + self.adjust_bias_factor(
                 average_reported_loss_ratio,
                 self.config.higher_log_bandwidth_bias_factor,
-            ) * f64::ln(1.0 + bandwidth.as_f64())
+            ) * f64::ln(1.0 + bandwidth_kbps)
     }
 
     fn adjust_bias_factor(&self, loss_rate: f64, bias_factor: f64) -> f64 {
         let diff = self.config.threshold_of_high_bandwidth_preference - loss_rate;
-        bias_factor * (diff / self.config.bandwidth_preference_smoothing_factor + diff.abs())
+        bias_factor * diff / (self.config.bandwidth_preference_smoothing_factor + diff.abs())
     }
 
     fn calculate_instant_upper_bound(&self) -> Bitrate {
@@ -1231,6 +1232,57 @@ mod test {
     }
 
     #[test]
+    fn bandwidth_bias_weight_is_bounded() {
+        let controller = LossController::new();
+        for loss in [0.0, 0.19, 0.2, 0.21, 0.3, 1.0] {
+            let weight = controller.adjust_bias_factor(loss, 0.02);
+            assert!(weight.abs() <= 0.02, "loss={loss}, weight={weight}");
+            assert_eq!(weight.signum(), (0.2_f64 - loss).signum());
+        }
+    }
+
+    #[test]
+    fn bandwidth_bias_uses_kilobits_per_second() {
+        let controller = LossController::new();
+        let expected = (0.2 / 0.202) * (0.0002 * 500.0 + 0.02 * 501.0_f64.ln());
+        let actual = controller.get_high_bandwidth_bias(Bitrate::kbps(500));
+        assert!((actual - expected).abs() < 1e-10, "bias={actual}");
+    }
+
+    #[test]
+    fn sustained_partial_delivery_preserves_a_usable_estimate() {
+        let start = Instant::now();
+        let mut controller = LossController::new();
+        controller.set_bandwidth_estimate(Bitrate::kbps(550));
+        controller.set_acknowledged_bitrate(Bitrate::kbps(224));
+        for batch in 0..250u64 {
+            if batch == 200 {
+                let estimate = controller.loss_based_result().bandwidth_estimate.unwrap();
+                assert!(
+                    estimate > Bitrate::kbps(100),
+                    "224 kbps delivered, estimate={estimate}"
+                );
+                assert!(
+                    estimate < Bitrate::kbps(320),
+                    "loss must still reduce the estimate"
+                );
+                controller.set_acknowledged_bitrate(Bitrate::kbps(320));
+            }
+            let packets: Vec<_> = (0..10u64)
+                .map(|packet| PacketResult {
+                    local_send_time: start + Duration::from_millis((batch * 10 + packet) * 30),
+                    size: DataSize::bytes(1200),
+                    lost: batch < 200 && packet < 3,
+                })
+                .collect();
+            controller.update_bandwidth_estimate(&packets, Bitrate::kbps(550));
+        }
+        let estimate = controller.loss_based_result().bandwidth_estimate.unwrap();
+        assert!(estimate > Bitrate::kbps(320) && estimate <= Bitrate::kbps(550));
+        assert_ne!(controller.state, LossControllerState::Decreasing);
+    }
+
+    #[test]
     fn no_loss() {
         // Test no loss, estimate should be bounded by delay based estimate
         let mut lbc = LossController::new();
@@ -1583,12 +1635,9 @@ mod test {
             } = lbc.loss_based_result();
 
             let estimate = bandwidth_estimate.expect("Should have an estimate");
-            assert!(
-                estimate > loss_limited && estimate <= Bitrate::mbps(1),
-                "During the recovery window after a loss spike the estimate should increase, but be bounded. loss_limited={}, estimate={}, expected <= 1 Mbps",
-                loss_limited,
-                estimate
-            );
+            // The weighted loss is 9.9 / 70, giving a 100 kbps / (loss - 0.05) cap.
+            assert!(estimate > loss_limited);
+            assert!((estimate.as_f64() - 1_093_750.0).abs() < 1.0);
             assert_eq!(state, LossControllerState::Decreasing);
         }
 
@@ -1605,10 +1654,8 @@ mod test {
             } = lbc.loss_based_result();
 
             let estimate = bandwidth_estimate.expect("Should have an estimate");
-            assert!(
-                estimate == Bitrate::bps(1_000_000),
-                "Eventually the estimate should recover but still remain bounded until the average loss caused by spike ages out"
-            );
+            // The loss-derived cap has cleared, leaving the original HOLD rate.
+            assert_eq!(estimate, Bitrate::kbps(1_250));
             assert_eq!(state, LossControllerState::Decreasing);
         }
     }

@@ -153,3 +153,20 @@ the time needed to discover available bandwidth.
 `StreamTx.discard_queued_media()` clears unsent media without resetting SSRCs or
 RTX history. WagaWebRTC uses it during a temporary ICE disconnect so keeping the
 session alive does not queue stale video or audio for a later burst.
+
+## Loss-estimator arithmetic
+
+The loss-controller bandwidth bias uses kilobits per second and divides its
+weight by the sum of smoothing and absolute loss difference, matching libWebRTC.
+The inherited expressions used bits per second and misplaced the denominator's
+parentheses, exaggerating the bandwidth penalty under loss. A deterministic
+60-second case with 224 kbps delivered collapsed to 8.7 bps before correction;
+it now remains above 100 kbps and resumes increasing when loss clears.
+This correction has not yet been verified against the Mac streaming stall.
+
+The testing branch passes 713 vendored unit tests, 21 core tests and seven
+bonded simulation scenarios. One bandwidth integration test still fails:
+`changing::bwe_changing_bandwidth` reports 421.491 kbps where its congestion
+checkpoint requires at least 500 kbps. That assertion is unchanged. Treat this
+as a candidate for Mac testing, not a validated streaming fix. Rebuild the
+XCFramework after switching branches; an existing binary will not include it.
