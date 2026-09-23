@@ -9,6 +9,8 @@ use super::super::time::{TimeDelta, Timestamp};
 const BURST_TIME_INTERVAL: Duration = Duration::from_millis(5);
 const SEND_TIME_GROUP_LENGTH: Duration = Duration::from_millis(5);
 const MAX_BURST_DURATION: Duration = Duration::from_millis(100);
+const ARRIVAL_TIME_OFFSET_THRESHOLD: Duration = Duration::from_secs(3);
+const REORDERED_RESET_THRESHOLD: usize = 3;
 
 #[derive(Debug, Default)]
 pub struct ArrivalGroup {
@@ -17,6 +19,7 @@ pub struct ArrivalGroup {
     last_local_send_time: Option<Instant>,
     last_remote_recv_time: Option<Instant>,
     size: usize,
+    last_local_recv_time: Option<Instant>,
 }
 
 impl ArrivalGroup {
@@ -42,6 +45,7 @@ impl ArrivalGroup {
             .last_remote_recv_time
             .max(Some(packet.remote_recv_time));
         self.last_local_send_time = self.last_local_send_time.max(Some(packet.local_send_time));
+        self.last_local_recv_time = self.last_local_recv_time.max(Some(packet.local_recv_time));
         self.size += 1;
         self.last_seq_no = self.last_seq_no.max(Some(packet.seq_no));
 
@@ -69,7 +73,9 @@ impl ArrivalGroup {
         let arrival_time_delta = Timestamp::from(packet.remote_recv_time) - self.remote_recv_time();
 
         let propagation_delta = arrival_time_delta - send_time_delta;
-        if propagation_delta < TimeDelta::ZERO
+        // A backward receive timestamp cannot extend a forward-moving burst.
+        if arrival_time_delta >= TimeDelta::ZERO
+            && propagation_delta < TimeDelta::ZERO
             && arrival_time_delta <= BURST_TIME_INTERVAL
             && packet.remote_recv_time - first_remote_recv_time < MAX_BURST_DURATION
         {
@@ -130,35 +136,67 @@ impl Belongs {
 pub struct ArrivalGroupAccumulator {
     previous_group: Option<ArrivalGroup>,
     current_group: ArrivalGroup,
+    consecutive_reordered_groups: usize,
+}
+
+/// A clock discontinuity invalidates the trend built from the old timing history.
+#[derive(Debug)]
+pub enum ArrivalGroupUpdate {
+    Pending,
+    Delta(InterGroupDelayDelta),
+    Reset,
 }
 
 impl ArrivalGroupAccumulator {
-    ///
-    /// Accumulate a packet.
-    ///
-    /// If adding this packet produced a new delay delta it is returned.
-    pub fn accumulate_packet(&mut self, packet: &AckedPacket) -> Option<InterGroupDelayDelta> {
-        let need_new_group = self.current_group.add_packet(packet);
-
-        if !need_new_group {
-            return None;
+    /// Accumulate a packet, reporting new delay evidence or a timing reset.
+    pub fn accumulate_packet(&mut self, packet: &AckedPacket) -> ArrivalGroupUpdate {
+        if !self.current_group.add_packet(packet) {
+            return ArrivalGroupUpdate::Pending;
         }
 
-        // Variation between previous group and current.
         let arrival_delta = self.arrival_delta();
         let send_delta = self.send_delta();
         let last_remote_recv_time = self.current_group.remote_recv_time();
 
-        let current_group = mem::take(&mut self.current_group);
-        self.previous_group = Some(current_group);
+        if let (Some(previous), Some(arrival_delta)) = (&self.previous_group, arrival_delta) {
+            let feedback_delta = Timestamp::from(self.current_group.last_local_recv_time.unwrap())
+                - previous.last_local_recv_time.unwrap();
+            // Compare clock changes, not absolute timestamps: the two clocks have different epochs.
+            if arrival_delta - feedback_delta >= ARRIVAL_TIME_OFFSET_THRESHOLD {
+                return self.reset(packet);
+            }
+            if arrival_delta < TimeDelta::ZERO {
+                self.consecutive_reordered_groups += 1;
+                if self.consecutive_reordered_groups >= REORDERED_RESET_THRESHOLD {
+                    return self.reset(packet);
+                }
+                // Discard this reordered group, retaining the last valid comparison point.
+                self.current_group = ArrivalGroup::default();
+                self.current_group.add_packet(packet);
+                return ArrivalGroupUpdate::Pending;
+            }
+            self.consecutive_reordered_groups = 0;
+        }
 
+        self.previous_group = Some(mem::take(&mut self.current_group));
         self.current_group.add_packet(packet);
 
-        Some(InterGroupDelayDelta {
-            send_delta: send_delta?,
-            arrival_delta: arrival_delta?,
-            last_remote_recv_time,
-        })
+        match (send_delta, arrival_delta) {
+            (Some(send_delta), Some(arrival_delta)) => {
+                ArrivalGroupUpdate::Delta(InterGroupDelayDelta {
+                    send_delta,
+                    arrival_delta,
+                    last_remote_recv_time,
+                })
+            }
+            _ => ArrivalGroupUpdate::Pending,
+        }
+    }
+
+    fn reset(&mut self, packet: &AckedPacket) -> ArrivalGroupUpdate {
+        *self = Self::default();
+        self.current_group.add_packet(packet);
+        ArrivalGroupUpdate::Reset
     }
 
     fn arrival_delta(&self) -> Option<TimeDelta> {
@@ -192,7 +230,9 @@ mod test {
 
     use crate::rtp_::DataSize;
 
-    use super::{AckedPacket, ArrivalGroup, ArrivalGroupAccumulator, Belongs, TimeDelta};
+    use super::{
+        AckedPacket, ArrivalGroup, ArrivalGroupAccumulator, ArrivalGroupUpdate, Belongs, TimeDelta,
+    };
 
     #[test]
     fn test_arrival_group_all_packets_belong_to_empty_group() {
@@ -427,8 +467,122 @@ mod test {
                 local_recv_time: Instant::now(), // does not matter
             });
 
-            assert_eq!(group_delta.map(|d| (d.send_delta, d.arrival_delta)), deltas);
+            let group_delta = match group_delta {
+                ArrivalGroupUpdate::Delta(d) => Some((d.send_delta, d.arrival_delta)),
+                ArrivalGroupUpdate::Pending => None,
+                ArrivalGroupUpdate::Reset => panic!("ordinary reordering must not reset timing"),
+            };
+            assert_eq!(group_delta, deltas);
         }
+    }
+
+    #[test]
+    fn timestamp_jump_does_not_stall_group_completion() {
+        let now = Instant::now();
+        let mut groups = ArrivalGroupAccumulator::default();
+        let mut recovered = 0;
+        for i in 0..200u64 {
+            let send = now + Duration::from_millis(i * 10);
+            // One feedback timestamp jumps ahead, then returns to its original clock.
+            let remote = send + Duration::from_secs(if i == 100 { 46 } else { 10 });
+            let observation = groups.accumulate_packet(&AckedPacket {
+                seq_no: i.into(),
+                size: DataSize::bytes(1200),
+                local_send_time: send,
+                remote_recv_time: remote,
+                local_recv_time: send + Duration::from_millis(50),
+            });
+            if i > 110 && matches!(observation, ArrivalGroupUpdate::Delta(_)) {
+                recovered += 1;
+            }
+        }
+        assert!(
+            recovered > 80,
+            "normal packets must produce fresh delay observations: {recovered}"
+        );
+    }
+
+    #[test]
+    fn persistent_clock_changes_reset_once_and_resume_observations() {
+        for offset_ms in [36_000i64, -36_000] {
+            let now = Instant::now();
+            let mut groups = ArrivalGroupAccumulator::default();
+            let mut resets = 0;
+            let mut observations = 0;
+            for i in 0..200u64 {
+                let send = now + Duration::from_millis(i * 10);
+                let remote_ms = 60_000 + i as i64 * 10 + if i >= 100 { offset_ms } else { 0 };
+                match groups.accumulate_packet(&AckedPacket {
+                    seq_no: i.into(),
+                    size: DataSize::bytes(1200),
+                    local_send_time: send,
+                    remote_recv_time: now + Duration::from_millis(remote_ms as u64),
+                    local_recv_time: send + Duration::from_millis(50),
+                }) {
+                    ArrivalGroupUpdate::Reset => resets += 1,
+                    ArrivalGroupUpdate::Delta(delta) if i > 110 => {
+                        assert_eq!(delta.send_delta, TimeDelta::from_millis(10));
+                        assert_eq!(delta.arrival_delta, TimeDelta::from_millis(10));
+                        observations += 1;
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(resets, 1, "offset {offset_ms}");
+            assert_eq!(observations, 89, "offset {offset_ms}");
+        }
+    }
+
+    #[test]
+    fn long_feedback_gap_is_not_a_clock_change() {
+        let now = Instant::now();
+        let mut groups = ArrivalGroupAccumulator::default();
+        let mut observations = 0;
+        for i in 0..100u64 {
+            let send = now + Duration::from_millis(i * 10 + if i >= 50 { 36_000 } else { 0 });
+            match groups.accumulate_packet(&AckedPacket {
+                seq_no: i.into(),
+                size: DataSize::bytes(1200),
+                local_send_time: send,
+                remote_recv_time: send + Duration::from_secs(10),
+                local_recv_time: send + Duration::from_millis(50),
+            }) {
+                ArrivalGroupUpdate::Reset => panic!("all clocks advanced together"),
+                ArrivalGroupUpdate::Delta(delta) => {
+                    assert_eq!(delta.send_delta, delta.arrival_delta);
+                    observations += 1;
+                }
+                ArrivalGroupUpdate::Pending => {}
+            }
+        }
+        assert_eq!(observations, 98);
+    }
+
+    #[test]
+    fn reordered_receive_group_is_skipped_without_resetting() {
+        let now = Instant::now();
+        let mut groups = ArrivalGroupAccumulator::default();
+        let mut deltas = Vec::new();
+        for (i, remote_ms) in [0, 10, 5, 30, 40, 50].into_iter().enumerate() {
+            let send = now + Duration::from_millis(i as u64 * 10);
+            match groups.accumulate_packet(&AckedPacket {
+                seq_no: (i as u64).into(),
+                size: DataSize::bytes(1200),
+                local_send_time: send,
+                remote_recv_time: now + Duration::from_millis(remote_ms),
+                local_recv_time: send + Duration::from_millis(50),
+            }) {
+                ArrivalGroupUpdate::Reset => panic!("isolated reordering must not reset timing"),
+                ArrivalGroupUpdate::Delta(delta) => {
+                    deltas.push((delta.send_delta, delta.arrival_delta))
+                }
+                ArrivalGroupUpdate::Pending => {}
+            }
+        }
+        assert_eq!(
+            deltas,
+            [10, 20, 10].map(|ms| (TimeDelta::from_millis(ms), TimeDelta::from_millis(ms)))
+        );
     }
 
     fn duration_us(us: u64) -> Duration {

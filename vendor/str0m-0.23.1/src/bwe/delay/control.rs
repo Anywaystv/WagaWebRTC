@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use super::super::macros::{log_bitrate_estimate, log_delay_variation};
 use super::super::{AckedPacket, BandwidthUsage};
-use super::arrival_group::ArrivalGroupAccumulator;
+use super::arrival_group::{ArrivalGroupAccumulator, ArrivalGroupUpdate};
 use super::rate_control::RateControl;
 use super::trendline::TrendlineEstimator;
 use crate::rtp_::{Bitrate, TwccSeq};
@@ -89,12 +89,19 @@ impl DelayController {
                 detector.updated = now;
                 (&mut detector.groups, &mut detector.trend)
             } else {
-                (&mut self.arrival_group_accumulator, &mut self.trendline_estimator)
+                (
+                    &mut self.arrival_group_accumulator,
+                    &mut self.trendline_estimator,
+                )
             };
-            if let Some(variation) = groups.accumulate_packet(acked_packet) {
-                log_delay_variation!(variation.arrival_delta);
-                // Each detector uses receiver time, independent of feedback batching.
-                trend.add_delay_observation(variation, variation.last_remote_recv_time);
+            match groups.accumulate_packet(acked_packet) {
+                ArrivalGroupUpdate::Delta(variation) => {
+                    log_delay_variation!(variation.arrival_delta);
+                    // Each detector uses receiver time, independent of feedback batching.
+                    trend.add_delay_observation(variation, variation.last_remote_recv_time);
+                }
+                ArrivalGroupUpdate::Reset => *trend = TrendlineEstimator::new(20),
+                ArrivalGroupUpdate::Pending => {}
             }
         }
 
@@ -263,6 +270,57 @@ impl DelayController {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn clock_jump_recovers_without_disabling_congestion_detection() {
+        for bonded in [false, true] {
+            let now = Instant::now();
+            let mut controller = DelayController::new(Bitrate::mbps(5));
+            let paths: HashMap<TwccSeq, u64> =
+                (0..600u64).map(|seq| (seq.into(), seq % 2)).collect();
+            for i in 0..300u64 {
+                let send_ms = i * 20;
+                let queue_ms = if i < 100 {
+                    i * 5
+                } else if i < 200 {
+                    500
+                } else {
+                    500 + (i - 200) * 5
+                };
+                let feedback = now + Duration::from_millis(send_ms + queue_ms + 50);
+                let packets: Vec<_> = (0..if bonded { 2 } else { 1 })
+                    .map(|path| AckedPacket {
+                        seq_no: (i * 2 + path).into(),
+                        size: crate::rtp_::DataSize::bytes(1200),
+                        local_send_time: now + Duration::from_millis(send_ms),
+                        remote_recv_time: now
+                            + Duration::from_millis(
+                                10_000 + send_ms + queue_ms + if i == 100 { 36_000 } else { 0 },
+                            ),
+                        local_recv_time: feedback,
+                    })
+                    .collect();
+                controller.update(
+                    &packets,
+                    bonded.then_some(&paths),
+                    Some(Bitrate::kbps(250)),
+                    None,
+                    feedback,
+                );
+                match i {
+                    99 | 299 => assert!(
+                        controller.is_overusing(),
+                        "real queue growth, bonded={bonded}, sample={i}"
+                    ),
+                    199 => assert!(
+                        !controller.is_overusing(),
+                        "stale overuse must clear, bonded={bonded}"
+                    ),
+                    _ => {}
+                }
+            }
+        }
+    }
 
     #[test]
     fn empty_feedback_does_not_refresh_delay_evidence() {

@@ -162,11 +162,32 @@ The inherited expressions used bits per second and misplaced the denominator's
 parentheses, exaggerating the bandwidth penalty under loss. A deterministic
 60-second case with 224 kbps delivered collapsed to 8.7 bps before correction;
 it now remains above 100 kbps and resumes increasing when loss clears.
-This correction has not yet been verified against the Mac streaming stall.
+Mac comparisons did not reproduce the near-zero estimate with this correction;
+complete bitrate recovery remains under investigation.
 
-The testing branch passes 713 vendored unit tests, 21 core tests and seven
-bonded simulation scenarios. One bandwidth integration test still fails:
+The arithmetic-only test commit (`80789d0`) passed 713 vendored unit tests,
+21 core tests and seven bonded simulation scenarios. One bandwidth integration test still fails:
 `changing::bwe_changing_bandwidth` reports 421.491 kbps where its congestion
 checkpoint requires at least 500 kbps. That assertion is unchanged. Treat this
 as a candidate for Mac testing, not a validated streaming fix. Rebuild the
 XCFramework after switching branches; an existing binary will not include it.
+
+## Delay timestamp recovery
+
+A backward receive timestamp no longer extends a burst indefinitely. Isolated
+reordered groups are skipped; three consecutive backward groups reset that path's
+timing history. A receiver-clock advance at least three seconds greater than the
+local feedback-clock advance also resets timing. These thresholds follow
+[libWebRTC's inter-arrival guards](https://webrtc.googlesource.com/src/+/refs/heads/main/modules/congestion_controller/goog_cc/inter_arrival_delta.cc).
+The associated trend resets because its history uses receiver-clock timestamps.
+The bitrate estimate, loss controller and congestion gates remain in place.
+
+Regression tests cover transient and persistent clock changes, ordinary reordering,
+long feedback gaps and renewed congestion on standard and bonded transports. Replaying
+139,204 acknowledged packets from the Mac capture restores observations during its
+36.5-second freeze, with a maximum observation gap of 303 ms in that interval.
+With both corrections, 718 vendored unit tests, 21 core tests and seven bonded
+simulation scenarios pass. Core formatting and core/vendor Clippy checks pass.
+This is an offline detector replay, not a live bitrate-recovery result. The source
+of the timestamp anomalies remains unresolved, and the previously documented
+421.491 kbps bandwidth integration failure still occurs.
