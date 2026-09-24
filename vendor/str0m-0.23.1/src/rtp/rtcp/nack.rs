@@ -1,8 +1,6 @@
 use super::extend_u16;
-use super::{FeedbackMessageType, ReportList, RtcpHeader, RtcpPacket, SeqNo};
+use super::{FeedbackMessageType, RtcpHeader, RtcpPacket, SeqNo};
 use super::{RtcpType, Ssrc, TransportType};
-
-use super::list::private::WordSized;
 
 /// A NACK entry indiciating packets missing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,7 +10,7 @@ pub struct Nack {
     /// The SSRC this nack reports missing packets for.
     pub ssrc: Ssrc,
     /// The missing nack. This can be multiple segments.
-    pub reports: ReportList<NackEntry>,
+    pub reports: Vec<NackEntry>,
 }
 
 /// A range of sequence numbers missing.
@@ -54,12 +52,6 @@ impl RtcpPacket for Nack {
     }
 }
 
-impl WordSized for NackEntry {
-    fn word_size(&self) -> usize {
-        1
-    }
-}
-
 impl<'a> TryFrom<&'a [u8]> for Nack {
     type Error = &'static str;
 
@@ -71,18 +63,18 @@ impl<'a> TryFrom<&'a [u8]> for Nack {
         let sender_ssrc = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]).into();
         let ssrc = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]).into();
 
-        let mut reports = ReportList::new();
-
-        let mut buf = &buf[8..];
-        let count = buf.len() / 4;
-        let max = count.min(31);
-
-        for _ in 0..max {
-            let pid = u16::from_be_bytes([buf[0], buf[1]]);
-            let blp = u16::from_be_bytes([buf[2], buf[3]]);
-            reports.push(NackEntry { pid, blp });
-            buf = &buf[4..];
+        if (buf.len() - 8) % 4 != 0 {
+            return Err("Nack has incomplete feedback entry");
         }
+
+        // Generic NACK has no 31-entry reception-report limit (RFC 4585).
+        let reports = buf[8..]
+            .chunks_exact(4)
+            .map(|entry| NackEntry {
+                pid: u16::from_be_bytes([entry[0], entry[1]]),
+                blp: u16::from_be_bytes([entry[2], entry[3]]),
+            })
+            .collect();
 
         Ok(Nack {
             sender_ssrc,
@@ -130,6 +122,47 @@ impl Iterator for NackEntryIterator {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn nack_preserves_all_feedback_entries() {
+        use super::super::{Rtcp, RtcpFb};
+        use std::collections::VecDeque;
+
+        for count in [1, 31, 32, 71, 300] {
+            let mut body = vec![0; 8 + count * 4];
+            body[..4].copy_from_slice(&123u32.to_be_bytes());
+            body[4..8].copy_from_slice(&456u32.to_be_bytes());
+            for (index, entry) in body[8..].chunks_exact_mut(4).enumerate() {
+                entry[..2].copy_from_slice(&((index * 17) as u16).to_be_bytes());
+                entry[2..].copy_from_slice(&0x8001u16.to_be_bytes());
+            }
+            let nack = Nack::try_from(body.as_slice()).unwrap();
+            assert_eq!(nack.reports.len(), count);
+            let mut wire = vec![0; 4 + body.len()];
+            assert_eq!(nack.write_to(&mut wire), wire.len());
+            assert_eq!(&wire[4..], body.as_slice());
+            let mut packets = VecDeque::new();
+            Rtcp::read_packet(&wire, &mut packets);
+            let feedback: Vec<_> = RtcpFb::from_rtcp(packets).collect();
+            assert_eq!(feedback.len(), 1);
+            let RtcpFb::Nack(ssrc, entries) = &feedback[0] else {
+                panic!("expected NACK")
+            };
+            assert_eq!(*ssrc, 456.into());
+            assert_eq!(entries.len(), count);
+            for (index, entry) in entries.iter().enumerate() {
+                assert_eq!(entry.pid, (index * 17) as u16);
+                assert_eq!(entry.blp, 0x8001);
+            }
+        }
+    }
+
+    #[test]
+    fn nack_rejects_incomplete_feedback_entries() {
+        for len in [0, 8, 11, 13, 14, 15] {
+            assert!(Nack::try_from(vec![0; len].as_slice()).is_err());
+        }
+    }
 
     #[test]
     fn nack_entry_iter() {

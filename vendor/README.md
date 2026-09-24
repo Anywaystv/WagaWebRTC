@@ -153,3 +153,11 @@ the time needed to discover available bandwidth.
 `StreamTx.discard_queued_media()` clears unsent media without resetting SSRCs or
 RTX history. WagaWebRTC uses it during a temporary ICE disconnect so keeping the
 session alive does not queue stale video or audio for a later burst.
+
+## Large NACK feedback
+
+Incoming Generic NACK packets retain every PID/BLP entry, including feedback
+with more than 31 entries. The reception-report count limit does not apply to
+Generic NACK. Outgoing NACK batches keep their existing 31-entry limit and
+packet-size checks. Tests cover large feedback through parsing, serialization
+and stream routing, malformed entries, and packing across datagram boundaries.

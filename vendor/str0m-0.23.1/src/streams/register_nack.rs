@@ -186,7 +186,7 @@ impl NackRegister {
                 Nack {
                     sender_ssrc: 0.into(),
                     ssrc: 0.into(), // changed when sending
-                    reports,
+                    reports: reports.into_iter().collect(),
                 }
             }),
         )

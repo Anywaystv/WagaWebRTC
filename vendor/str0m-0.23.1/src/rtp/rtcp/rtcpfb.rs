@@ -1,5 +1,5 @@
 use super::{AppSpecificFeedback, DlrrItem, FirEntry, NackEntry, ReceptionReport, Remb};
-use super::{ReportBlock, ReportList, Rrtr, Rtcp, Sdes, SenderInfo, Ssrc, Twcc};
+use super::{ReportBlock, Rrtr, Rtcp, Sdes, SenderInfo, Ssrc, Twcc};
 
 /// Normalization of [`Rtcp`] so we can deal with one SSRC at a time.
 #[allow(clippy::large_enum_variant)]
@@ -11,7 +11,7 @@ pub enum RtcpFb {
     Rrtr((Rrtr, Ssrc)),                       // rx -> tx
     SourceDescription(Sdes),                  // tx -> rx
     Goodbye(Ssrc),                            // tx -> rx
-    Nack(Ssrc, ReportList<NackEntry>),        // rx -> tx
+    Nack(Ssrc, Vec<NackEntry>),               // rx -> tx
     Pli(Ssrc),                                // rx -> tx
     Fir(FirEntry),                            // rx -> tx
     Twcc(Twcc),                               // rx -> tx

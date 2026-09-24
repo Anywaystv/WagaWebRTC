@@ -214,7 +214,12 @@ impl Rtcp {
 
             // Stack Nack
             (Rtcp::Nack(n1), Rtcp::Nack(n2)) if n1.ssrc == n2.ssrc => {
-                let n = n1.reports.append_all_possible(&mut n2.reports, words_left);
+                // Keep outbound batches at 31 entries while accepting larger incoming NACKs.
+                let n = 31usize
+                    .saturating_sub(n1.reports.len())
+                    .min(n2.reports.len())
+                    .min(words_left);
+                n1.reports.extend(n2.reports.drain(..n));
                 n > 0
             }
 
@@ -236,7 +241,7 @@ impl Rtcp {
             Rtcp::ExtendedReport(_) => true,
             Rtcp::SourceDescription(v) => v.reports.is_full(),
             Rtcp::Goodbye(v) => v.reports.is_full(),
-            Rtcp::Nack(v) => v.reports.is_full(),
+            Rtcp::Nack(v) => v.reports.len() >= 31,
             Rtcp::Pli(_) => true,
             Rtcp::Fir(v) => v.reports.is_full(),
             Rtcp::Twcc(_) => true,
@@ -487,6 +492,46 @@ mod test {
 
     use super::twcc::{Delta, PacketChunk, PacketStatus};
     use super::*;
+
+    #[test]
+    fn nack_packing_preserves_entries_across_datagrams() {
+        for capacity in [100, 1500] {
+            let mut queue: VecDeque<_> = (0..2)
+                .map(|batch| {
+                    Rtcp::Nack(Nack {
+                        sender_ssrc: 123.into(),
+                        ssrc: 456.into(),
+                        reports: (0..20)
+                            .map(|index| NackEntry {
+                                pid: batch * 20 + index,
+                                blp: 0,
+                            })
+                            .collect(),
+                    })
+                })
+                .collect();
+            let mut received = VecDeque::new();
+            let mut buffer = vec![0; capacity];
+            while !queue.is_empty() {
+                let written = Rtcp::write_packet(&mut queue, &mut buffer, |_| {});
+                assert!(written > 0);
+                assert!(written <= buffer.len());
+                Rtcp::read_packet(&buffer[..written], &mut received);
+            }
+            assert_eq!(received.len(), 2);
+            let entries: Vec<_> = received
+                .into_iter()
+                .flat_map(|packet| {
+                    let Rtcp::Nack(nack) = packet else {
+                        panic!("expected NACK")
+                    };
+                    assert!(nack.reports.len() <= 31);
+                    nack.reports.into_iter().map(|entry| entry.pid)
+                })
+                .collect();
+            assert_eq!(entries, (0..40).collect::<Vec<_>>());
+        }
+    }
 
     #[test]
     fn padding_of_rtcp() {
