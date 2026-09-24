@@ -188,6 +188,29 @@ long feedback gaps and renewed congestion on standard and bonded transports. Rep
 36.5-second freeze, with a maximum observation gap of 303 ms in that interval.
 With both corrections, 718 vendored unit tests, 21 core tests and seven bonded
 simulation scenarios pass. Core formatting and core/vendor Clippy checks pass.
-This is an offline detector replay, not a live bitrate-recovery result. The source
-of the timestamp anomalies remains unresolved, and the previously documented
-421.491 kbps bandwidth integration failure still occurs.
+This is an offline detector replay, not a live bitrate-recovery result. That replay
+did not identify the timestamp source. The separately documented 421.491 kbps
+bandwidth integration failure still occurs.
+
+## TWCC receive-delta parsing
+
+A run of `n` large receive deltas consumes `2*n` bytes. The parser previously
+advanced only `n` bytes after reading the run, so later chunks reused delta bytes
+and produced incorrect receive timestamps. The cursor now advances by the full
+encoded length. Packet status handling and congestion-control thresholds are
+unchanged.
+
+Regressions cover mixed chunks, multiple large-delta runs, signed limits,
+receive-time reconstruction and a truncated following delta. Both new tests fail
+before correction. Replaying all 15,422 raw feedback reports from four Mac runs
+through the corrected Rust parser matches independent decoding for 5,891,872
+reported packet statuses, including overlapping reports, with no mismatches.
+The earlier parser reproduced a 69.844-second timestamp error from a real capture.
+Raw captures and replay tools remain outside the repository. All 720 vendored
+unit tests, 21 core tests and seven bonded simulation scenarios pass, as do core
+formatting and core/vendor Clippy checks.
+
+The correction still needs a fresh live Mac recovery comparison. In particular,
+the previous failed run's cross-path probe timing must be rechecked; successful
+packet decoding alone does not prove sustained recovery to 5 Mbps. The separate
+421.491 kbps bandwidth integration failure remains unchanged.

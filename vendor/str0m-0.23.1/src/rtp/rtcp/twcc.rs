@@ -939,7 +939,7 @@ impl<'a> TryFrom<&'a [u8]> for Twcc {
                 PacketChunk::Run(PacketStatus::ReceivedLargeOrNegativeDelta, n) => {
                     let n = *n as usize;
                     twcc.delta.extend(read_delta_large(buf, n)?);
-                    buf = &buf[n..];
+                    buf = &buf[n * 2..];
                 }
                 PacketChunk::VectorSingle(v, _) => {
                     let n = v.count_ones() as usize;
@@ -1508,6 +1508,73 @@ mod test {
     use Delta::*;
     use PacketChunk::*;
     use PacketStatus::*;
+
+    #[test]
+    fn large_delta_run_preserves_following_chunks() {
+        for count in [1, 2, 7, 20] {
+            let mut deltas: VecDeque<_> = (0..count)
+                .map(|i| Large([320, -40, i16::MAX, i16::MIN][i as usize % 4]))
+                .collect();
+            deltas.extend([
+                Small(9),
+                Small(200),
+                Small(2),
+                Small(0),
+                Small(255),
+                Large(300),
+                Large(-300),
+                Large(-70),
+                Small(19),
+                Large(400),
+                Small(1),
+            ]);
+            let report = Twcc {
+                sender_ssrc: 1.into(),
+                ssrc: 2.into(),
+                base_seq: 100,
+                status_count: count + 27,
+                reference_time: 10_000,
+                feedback_count: 1,
+                chunks: VecDeque::from([
+                    Run(ReceivedLargeOrNegativeDelta, count),
+                    Run(NotReceived, 2),
+                    Run(ReceivedSmallDelta, 2),
+                    VectorSingle(0b10101000000000, 14),
+                    Run(ReceivedLargeOrNegativeDelta, 2),
+                    VectorDouble(0b10_01_00_10_01_00_00, 7),
+                ]),
+                delta: deltas,
+            };
+            let mut wire = [0; 1500];
+            let len = report.write_to(&mut wire);
+            let parsed = Twcc::try_from(&wire[4..len]).unwrap();
+            assert_eq!(parsed, report, "large run count={count}");
+            let now = Instant::now();
+            assert_eq!(
+                parsed.into_iter(now, 100.into()).collect::<Vec<_>>(),
+                report.into_iter(now, 100.into()).collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    #[test]
+    fn large_delta_run_wire_timestamps_and_truncation() {
+        // Two signed large deltas (+64 ms, -250 us), then a +1 ms small delta.
+        let wire = [
+            0, 0, 0, 0, 0, 0, 0, 0, // SSRCs
+            0, 100, 0, 3, 0, 0, 1, 0, // Base sequence, count, reference, feedback count
+            0x40, 2, 0x20, 1, // Large run of two, small run of one
+            1, 0, 0xff, 0xff, 4,
+        ];
+        assert!(Twcc::try_from(&wire[..wire.len() - 1]).is_err());
+        let report = Twcc::try_from(wire.as_slice()).unwrap();
+        let now = Instant::now();
+        let received: Vec<_> = report
+            .into_iter(now, 100.into())
+            .map(|(seq, _, time)| (*seq, time.unwrap().duration_since(now).as_micros()))
+            .collect();
+        assert_eq!(received, [(100, 128_000), (101, 127_750), (102, 128_750)]);
+    }
 
     #[test]
     fn register_write_parse_small_delta() {
