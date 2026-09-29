@@ -1,6 +1,7 @@
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
+use std::time::Instant;
 
 use crate::{Codec, Media, PeerEvent, Publisher, Transmit};
 
@@ -115,6 +116,35 @@ pub extern "C" fn waga_peer_create_with_bwe(
         let video = decode_codec(video_codec).ok()?;
         Publisher::new_with_bwe(audio, video, Some(initial_bitrate), Some(desired_bitrate)).ok()
     })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn waga_peer_create_with_video_loss_stats(
+    audio_codec: i32,
+    video_codec: i32,
+    target_bitrate: u64,
+) -> *mut WagaPeer {
+    create_peer(|| {
+        let audio = decode_codec(audio_codec).ok()?;
+        let video = decode_codec(video_codec).ok()?;
+        let target = (target_bitrate != 0).then_some(target_bitrate);
+        Publisher::new_with_bwe_and_stats(audio, video, target, target, true).ok()
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn waga_peer_video_packet_loss(peer: *mut WagaPeer, output: *mut f32) -> bool {
+    let Ok(peer) = peer_mut(peer) else {
+        return false;
+    };
+    let Some(output) = (unsafe { output.as_mut() }) else {
+        return false;
+    };
+    let Some(loss) = peer.publisher.video_packet_loss(Instant::now()) else {
+        return false;
+    };
+    *output = loss;
+    true
 }
 
 #[unsafe(no_mangle)]

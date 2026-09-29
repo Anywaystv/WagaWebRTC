@@ -63,8 +63,11 @@ public struct WagaCoreError: Error, CustomStringConvertible, Sendable {
 final class WagaCore: @unchecked Sendable {
     private let peer: OpaquePointer
 
-    init(audio: WagaCodec, video: WagaCodec, targetBitrate: UInt64? = nil) throws {
-        let peer = if let targetBitrate {
+    init(audio: WagaCodec, video: WagaCodec, targetBitrate: UInt64? = nil,
+         videoPacketLossStats: Bool = false) throws {
+        let peer = if videoPacketLossStats {
+            waga_peer_create_with_video_loss_stats(audio.rawValue, video.rawValue, targetBitrate ?? 0)
+        } else if let targetBitrate {
             waga_peer_create_with_bwe(
                 audio.rawValue,
                 video.rawValue,
@@ -222,6 +225,11 @@ final class WagaCore: @unchecked Sendable {
             senderMediaTime: output.sender_media_time,
             data: Data(bytes: data, count: output.length)
         )
+    }
+
+    func videoPacketLoss() -> Double? {
+        var fraction: Float = 0
+        return waga_peer_video_packet_loss(peer, &fraction) ? Double(fraction) : nil
     }
 
     func pollBitrateEstimate() -> UInt64? {

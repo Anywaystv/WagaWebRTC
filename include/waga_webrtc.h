@@ -52,6 +52,9 @@ typedef struct WagaMedia {
 WagaPeer *waga_peer_create(int32_t audio_codec, int32_t video_codec);
 WagaPeer *waga_peer_create_with_bwe(int32_t audio_codec, int32_t video_codec,
                                     uint64_t initial_bitrate, uint64_t desired_bitrate);
+WagaPeer *waga_peer_create_with_video_loss_stats(int32_t audio_codec, int32_t video_codec,
+                                                uint64_t target_bitrate);
+bool waga_peer_video_packet_loss(WagaPeer *peer, float *output);
 WagaPeer *waga_receiver_create(void);
 void waga_peer_destroy(WagaPeer *peer);
 const char *waga_peer_last_error(WagaPeer *peer);

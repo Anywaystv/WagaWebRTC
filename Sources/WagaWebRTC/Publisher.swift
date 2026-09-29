@@ -36,12 +36,14 @@ public final class WagaPublisher: @unchecked Sendable {
         connectionPriorities: WagaConnectionPriorities = .init(),
         targetBitrate: UInt64? = nil,
         diagnostics: Bool = false,
+        videoPacketLossStats: Bool = false,
         delegate: (any WagaPublisherDelegate)? = nil
     ) throws {
         self.delegate = delegate
         self.diagnostics = diagnostics
         gatheringDelayMilliseconds = iceServers.isEmpty ? 150 : 1_000
-        core = try WagaCore(audio: audio, video: video, targetBitrate: targetBitrate)
+        core = try WagaCore(audio: audio, video: video, targetBitrate: targetBitrate,
+                            videoPacketLossStats: videoPacketLossStats)
         network = WagaNetwork(
             queue: queue,
             bonding: mode == .bonded,
@@ -132,6 +134,12 @@ public final class WagaPublisher: @unchecked Sendable {
             } catch {
                 self.delegate?.wagaPublisherFailed(String(describing: error))
             }
+        }
+    }
+
+    public func videoPacketLoss() -> Double? {
+        queue.sync {
+            stopped ? nil : core.videoPacketLoss()
         }
     }
 
