@@ -3,14 +3,25 @@ use str0m::stats::MediaEgressStats;
 
 fn stats(mid: str0m::media::Mid, now: Instant, loss: Option<f32>) -> MediaEgressStats {
     MediaEgressStats {
-        mid, rid: None, bytes: 1000, packets: 10, firs: 0, plis: 0, nacks: 0,
-        rtt: None, loss, timestamp: now, remote: None,
+        mid,
+        rid: None,
+        bytes: 1000,
+        packets: 10,
+        firs: 0,
+        plis: 0,
+        nacks: 0,
+        rtt: None,
+        loss,
+        timestamp: now,
+        remote: None,
     }
 }
 
 #[test]
 fn video_loss_requires_valid_video_feedback_and_expires() {
-    let mut peer = Publisher::new_with_bwe_and_stats(Some(Codec::Opus), Some(Codec::H264), None, None, true).unwrap();
+    let mut peer =
+        Publisher::new_with_bwe_and_stats(Some(Codec::Opus), Some(Codec::H264), None, None, true)
+            .unwrap();
     peer.create_offer().unwrap();
     let now = Instant::now();
     let video = peer.video_mid.unwrap();
@@ -24,22 +35,43 @@ fn video_loss_requires_valid_video_feedback_and_expires() {
     peer.record_video_packet_loss(stats(video, now, Some(32.0 / 255.0)));
     assert_eq!(peer.video_packet_loss(now), Some(0.125));
     peer.record_video_packet_loss(stats(video, now + Duration::from_secs(4), None));
-    assert_eq!(peer.video_packet_loss(now + Duration::from_secs(4)), Some(0.125));
+    assert_eq!(
+        peer.video_packet_loss(now + Duration::from_secs(4)),
+        Some(0.125)
+    );
     assert_eq!(peer.video_packet_loss(now + Duration::from_secs(5)), None);
     peer.record_video_packet_loss(stats(video, now + Duration::from_secs(6), Some(0.0)));
-    assert_eq!(peer.video_packet_loss(now + Duration::from_secs(6)), Some(0.0));
-    peer.ice_state_changed(IceConnectionState::Disconnected, now + Duration::from_secs(6));
+    assert_eq!(
+        peer.video_packet_loss(now + Duration::from_secs(6)),
+        Some(0.0)
+    );
+    peer.ice_state_changed(
+        IceConnectionState::Disconnected,
+        now + Duration::from_secs(6),
+    );
     assert_eq!(peer.video_packet_loss(now + Duration::from_secs(6)), None);
-    assert_eq!(Publisher::new(Some(Codec::Opus), Some(Codec::H264)).unwrap().video_packet_loss(now), None);
+    assert_eq!(
+        Publisher::new(Some(Codec::Opus), Some(Codec::H264))
+            .unwrap()
+            .video_packet_loss(now),
+        None
+    );
 }
 
 #[test]
 fn encrypted_receiver_reports_show_loss_then_clean_then_unavailable() {
-    let mut sender = Publisher::new_with_bwe_and_stats(None, Some(Codec::H264), None, None, true).unwrap();
+    let mut sender =
+        Publisher::new_with_bwe_and_stats(None, Some(Codec::H264), None, None, true).unwrap();
     let mut receiver = Publisher::new_receiver().unwrap();
-    sender.add_local_candidate("127.0.0.1:40100".parse().unwrap()).unwrap();
-    receiver.add_local_candidate("127.0.0.1:40101".parse().unwrap()).unwrap();
-    let answer = receiver.accept_offer(&sender.create_offer().unwrap()).unwrap();
+    sender
+        .add_local_candidate("127.0.0.1:40100".parse().unwrap())
+        .unwrap();
+    receiver
+        .add_local_candidate("127.0.0.1:40101".parse().unwrap())
+        .unwrap();
+    let answer = receiver
+        .accept_offer(&sender.create_offer().unwrap())
+        .unwrap();
     sender.accept_answer(&answer).unwrap();
     let start = Instant::now();
     let mut dropped = 0;
@@ -55,9 +87,20 @@ fn encrypted_receiver_reports_show_loss_then_clean_then_unavailable() {
         let mut primary_pt = None;
         if sender.rtc.is_connected() {
             let writer = sender.rtc.writer(sender.video_mid.unwrap()).unwrap();
-            let pt = writer.payload_params().find(|p| p.spec().codec == str0m::format::Codec::H264).unwrap().pt();
+            let pt = writer
+                .payload_params()
+                .find(|p| p.spec().codec == str0m::format::Codec::H264)
+                .unwrap()
+                .pt();
             primary_pt = Some(*pt);
-            writer.write(pt, now, MediaTime::new(step * 1800, Frequency::NINETY_KHZ), Arc::<[u8]>::from([0,0,0,1,0x65,0x01])).unwrap();
+            writer
+                .write(
+                    pt,
+                    now,
+                    MediaTime::new(step * 1800, Frequency::NINETY_KHZ),
+                    Arc::<[u8]>::from([0, 0, 0, 1, 0x65, 0x01]),
+                )
+                .unwrap();
             sender.drain_at(now).unwrap();
         }
         while let Some(packet) = sender.poll_transmit() {
@@ -70,25 +113,50 @@ fn encrypted_receiver_reports_show_loss_then_clean_then_unavailable() {
                     continue;
                 }
             }
-            let input = Receive::new(Protocol::Udp, packet.source, packet.destination, data).unwrap();
-            receiver.rtc.handle_input(Input::Receive(now, input)).unwrap();
+            let input =
+                Receive::new(Protocol::Udp, packet.source, packet.destination, data).unwrap();
+            receiver
+                .rtc
+                .handle_input(Input::Receive(now, input))
+                .unwrap();
             receiver.drain_at(now).unwrap();
         }
         while let Some(packet) = receiver.poll_transmit() {
-            let input = Receive::new(Protocol::Udp, packet.source, packet.destination, &packet.contents).unwrap();
+            let input = Receive::new(
+                Protocol::Udp,
+                packet.source,
+                packet.destination,
+                &packet.contents,
+            )
+            .unwrap();
             sender.rtc.handle_input(Input::Receive(now, input)).unwrap();
             sender.drain_at(now).unwrap();
         }
         while receiver.poll_media().is_some() {}
         if let Some(loss) = sender.video_packet_loss(now) {
-            if (150..250).contains(&step) { before.push(loss); }
-            if (400..650).contains(&step) { during.push(loss); }
-            if step >= 1000 { after.push(loss); }
+            if (150..250).contains(&step) {
+                before.push(loss);
+            }
+            if (400..650).contains(&step) {
+                during.push(loss);
+            }
+            if step >= 1000 {
+                after.push(loss);
+            }
         }
     }
     assert!(dropped > 0);
-    assert!(!before.is_empty() && before.iter().all(|x| *x == 0.0), "clean: {before:?}");
+    assert!(
+        !before.is_empty() && before.iter().all(|x| *x == 0.0),
+        "clean: {before:?}"
+    );
     assert!(during.iter().any(|x| *x > 0.0), "loss: {during:?}");
-    assert!(!after.is_empty() && after.iter().all(|x| *x == 0.0), "restored: {after:?}");
-    assert_eq!(sender.video_packet_loss(start + Duration::from_secs(30)), None);
+    assert!(
+        !after.is_empty() && after.iter().all(|x| *x == 0.0),
+        "restored: {after:?}"
+    );
+    assert_eq!(
+        sender.video_packet_loss(start + Duration::from_secs(30)),
+        None
+    );
 }
