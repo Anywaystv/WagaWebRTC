@@ -12,6 +12,8 @@ use str0m::{Candidate, Event, IceConnectionState, Input, Output, Rtc, RtcConfig}
 #[cfg(all(test, target_os = "macos"))]
 mod bonding_tests;
 mod ffi;
+#[cfg(test)]
+mod packet_loss_tests;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Codec {
@@ -57,6 +59,7 @@ pub struct Publisher {
     events: VecDeque<PeerEvent>,
     media: VecDeque<Media>,
     bitrate_estimates: VecDeque<u64>,
+    video_packet_loss: Option<(Instant, f32)>,
     next_timeout: Option<Instant>,
     disconnect_grace: Duration,
     disconnect_deadline: Option<Instant>,
@@ -77,6 +80,16 @@ impl Publisher {
         initial_bitrate: Option<u64>,
         desired_bitrate: Option<u64>,
     ) -> Result<Self, String> {
+        Self::new_with_bwe_and_stats(audio, video, initial_bitrate, desired_bitrate, false)
+    }
+
+    pub fn new_with_bwe_and_stats(
+        audio: Option<Codec>,
+        video: Option<Codec>,
+        initial_bitrate: Option<u64>,
+        desired_bitrate: Option<u64>,
+        video_loss_stats: bool,
+    ) -> Result<Self, String> {
         if audio.is_none() && video.is_none() {
             return Err("at least one media track is required".into());
         }
@@ -92,13 +105,14 @@ impl Publisher {
             video == Some(Codec::H265),
             initial_bitrate,
             desired_bitrate,
+            video_loss_stats,
         )?;
         publisher.disconnect_grace = Duration::from_secs(15);
         Ok(publisher)
     }
 
     pub fn new_receiver() -> Result<Self, String> {
-        Self::build(Some(Codec::Opus), true, true, None, None)
+        Self::build(Some(Codec::Opus), true, true, None, None, false)
     }
 
     fn build(
@@ -107,12 +121,14 @@ impl Publisher {
         h265: bool,
         initial_bitrate: Option<u64>,
         desired_bitrate: Option<u64>,
+        video_loss_stats: bool,
     ) -> Result<Self, String> {
         let mut config = RtcConfig::new()
             .clear_codecs()
             .enable_opus(audio == Some(Codec::Opus))
             .enable_h264(h264)
-            .enable_h265(h265);
+            .enable_h265(h265)
+            .set_stats_interval(video_loss_stats.then_some(Duration::from_secs(1)));
         if audio == Some(Codec::Aac) {
             config.codec_config().add_config(
                 112.into(), None, str0m::format::Codec::Aac,
@@ -140,6 +156,7 @@ impl Publisher {
             events: VecDeque::new(),
             media: VecDeque::new(),
             bitrate_estimates: VecDeque::new(),
+            video_packet_loss: None,
             next_timeout: None,
             disconnect_grace: Duration::ZERO,
             disconnect_deadline: None,
@@ -401,6 +418,24 @@ impl Publisher {
         self.bitrate_estimates.pop_front()
     }
 
+    pub fn video_packet_loss(&self, now: Instant) -> Option<f32> {
+        let (measured_at, fraction) = self.video_packet_loss?;
+        (now.checked_duration_since(measured_at)? < Duration::from_secs(5)).then_some(fraction)
+    }
+
+    fn record_video_packet_loss(&mut self, stats: str0m::stats::MediaEgressStats) {
+        if Some(stats.mid) != self.video_mid || stats.rid.is_some() {
+            return;
+        }
+        if let Some(loss) = stats
+            .loss
+            .filter(|loss| loss.is_finite() && (0.0..=1.0).contains(loss))
+        {
+            // str0m 0.23.1 normalizes RR fractions by 255; the wire scale is 256.
+            self.video_packet_loss = Some((stats.timestamp, loss * 255.0 / 256.0));
+        }
+    }
+
     pub fn bwe_diagnostic_snapshot(&mut self) -> String {
         self.rtc.bwe().diagnostic_snapshot(Instant::now())
     }
@@ -438,6 +473,7 @@ impl Publisher {
                     Event::IceConnectionStateChange(state) => {
                         self.ice_state_changed(state, now);
                     }
+                    Event::MediaEgressStats(stats) => self.record_video_packet_loss(stats),
                     Event::KeyframeRequest(_) => self.events.push_back(PeerEvent::KeyframeRequest),
                     Event::EgressBitrateEstimate(estimate) => {
                         let bitrate = match estimate {
@@ -450,6 +486,7 @@ impl Publisher {
                         self.bitrate_estimates.push_back(bitrate);
                     }
                     Event::Closed => {
+                        self.video_packet_loss = None;
                         self.disconnect_deadline = None;
                         self.events.push_back(PeerEvent::Closed);
                     }
@@ -498,6 +535,7 @@ impl Publisher {
                 self.disconnect_deadline = None;
             }
             IceConnectionState::Disconnected if !self.disconnect_reported => {
+                self.video_packet_loss = None;
                 if self.ever_connected && !self.disconnect_grace.is_zero() {
                     // Keep ICE, DTLS and the bonded paths alive while a phone
                     // changes networks. Repeated events must not extend this window.
